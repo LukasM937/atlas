@@ -51,16 +51,19 @@
     RequestHeader unset X-Forwarded-For
     RequestHeader unset X-Real-IP
 
-    # --- MCP: only Anthropic's outbound range may reach it -----------------
-    # 160.79.104.0/21 is the published outbound range used for MCP tool calls.
-    # RE-CHECK before applying; this is the one value here that can change.
-    # If the connector fails to attach, do NOT widen this blindly — capture the
-    # real source addresses from the log first.
+    # --- MCP: public on purpose ---------------------------------------------
+    # Decision (2026-07-28), confirmed necessary not just theoretical
+    # (2026-07-29): an IP allowlist here doesn't work once OAuth (Phase 4)
+    # is live. OAuth's server-to-server calls (dynamic client registration,
+    # token exchange) come from IPs outside any single published range —
+    # confirmed in practice: ChatGPT's registration calls came from an Azure
+    # range nowhere near Anthropic's published block, and got blocked by
+    # this same rule when it still existed. The `/authorize` step is also a
+    # browser redirect from the end user's own IP, not any client's server
+    # range at all. OAuth (GitHub identity + PKCE + short-lived tokens) is
+    # the real control now, same reasoning already applied to /api/.
     <Location "/mcp/">
-        <RequireAny>
-            Require ip 160.79.104.0/21
-            # Require ip <your-home-/32>   # uncomment only while debugging
-        </RequireAny>
+        Require all granted
     </Location>
 
     # --- REST facade: public on purpose ------------------------------------
