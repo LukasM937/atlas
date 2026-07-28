@@ -10,10 +10,11 @@ Routes
   /openapi.json              schema for the REST facade
   /healthz                   liveness
 
-Only one of the two /mcp mounts is ever live: FastMCP's own auth middleware
-applies to the whole app instance uniformly, so there is no way to run the
-same instance with OAuth on one path and the old path-secret on another.
-Set the OAuth env vars to switch over; unset them to revert instantly (a
+Only one of the two /mcp modes is ever live: FastMCP builds its own
+AuthenticationMiddleware bound to the single oauth_provider, and there's
+only one of those per instance, so there is no way to run the same
+instance with OAuth on one path and the old path-secret on another. Set
+the OAuth env vars to switch over; unset them to revert instantly (a
 redeploy, nothing else) — see docs/ADR-001-auth.md.
 """
 
@@ -26,13 +27,16 @@ from collections import defaultdict, deque
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
+from starlette.middleware.authentication import AuthenticationMiddleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from mcp.server.auth.provider import AuthorizeError
+from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
+from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend
+from mcp.server.auth.provider import AuthorizeError, ProviderTokenVerifier
 
 from .server import ATLAS_PUBLIC_URL, OAUTH_ENABLED, mcp, oauth_provider, store
 from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
@@ -296,16 +300,31 @@ if OAUTH_ENABLED:
 else:
     routes.append(Mount(f"/mcp/{TOKEN}", app=mcp.streamable_http_app()))
 
+_middleware = [
+    Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
+               allow_headers=["*"], expose_headers=["mcp-session-id"]),
+    Middleware(RateLimitMiddleware),
+    Middleware(BodySizeLimitMiddleware),
+]
+if OAUTH_ENABLED:
+    # FastMCP normally adds these itself inside the Starlette app it builds
+    # for streamable_http_app() -- lost when that app's routes were flattened
+    # into this one instead of mounted (see routes= above), since middleware
+    # is application-level, not carried along with individual routes. Without
+    # this, RequireAuthMiddleware (attached per-route, still present) always
+    # sees scope["user"] unset and 401s every request regardless of a valid
+    # token -- confirmed in practice: /token kept succeeding while every
+    # following /mcp call still 401'd.
+    _middleware += [
+        Middleware(AuthenticationMiddleware, backend=BearerAuthBackend(ProviderTokenVerifier(oauth_provider))),
+        Middleware(AuthContextMiddleware),
+    ]
+
 app = Starlette(
     routes=routes,
     lifespan=lambda a: mcp.session_manager.run(),
     exception_handlers={Exception: on_error, AtlasError: on_error, PermissionError: on_error},
-    middleware=[
-        Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"], expose_headers=["mcp-session-id"]),
-        Middleware(RateLimitMiddleware),
-        Middleware(BodySizeLimitMiddleware),
-    ],
+    middleware=_middleware,
 )
 
 if __name__ == "__main__":
