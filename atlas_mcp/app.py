@@ -34,7 +34,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 
 from mcp.server.auth.provider import AuthorizeError
 
-from .server import OAUTH_ENABLED, mcp, oauth_provider, store
+from .server import ATLAS_PUBLIC_URL, OAUTH_ENABLED, mcp, oauth_provider, store
 from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
 
 TOKEN = os.environ.get("ATLAS_TOKEN") or secrets.token_urlsafe(24)
@@ -284,6 +284,31 @@ routes = [
 ]
 if OAUTH_ENABLED:
     routes.append(Route("/oauth/github/callback", github_oauth_callback))
+
+    # FastMCP auto-generates an RFC 9728 "protected resource metadata" route
+    # too, but its path is computed FROM the resource URL (already includes
+    # "/mcp") and then gets mounted again under our own Mount("/mcp", ...),
+    # landing at /mcp/.well-known/oauth-protected-resource/mcp -- not the
+    # root-relative path (/.well-known/oauth-protected-resource/mcp) a
+    # spec-following client actually requests. Re-registered here at the
+    # correct top-level path with the same content, bypassing the buried,
+    # unreachable copy FastMCP built internally.
+    from urllib.parse import urlparse
+
+    from mcp.server.auth.handlers.metadata import ProtectedResourceMetadataHandler
+    from mcp.server.auth.routes import build_resource_metadata_url
+    from mcp.shared.auth import ProtectedResourceMetadata
+
+    _resource_url = f"{ATLAS_PUBLIC_URL}/mcp"
+    _prm_handler = ProtectedResourceMetadataHandler(
+        ProtectedResourceMetadata(
+            resource=_resource_url,
+            authorization_servers=[_resource_url],
+            scopes_supported=["mcp"],
+        )
+    )
+    _prm_path = urlparse(str(build_resource_metadata_url(_resource_url))).path
+    routes.append(Route(_prm_path, endpoint=_prm_handler.handle, methods=["GET", "OPTIONS"]))
 
 app = Starlette(
     routes=routes,
