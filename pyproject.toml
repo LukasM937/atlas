@@ -3,7 +3,7 @@ name = "atlas-mcp"
 version = "2.0.0"
 description = "Shared LLM note layer: markdown store exposed over MCP and REST"
 requires-python = ">=3.11"
-dependencies = ["mcp>=1.28", "pyyaml>=6.0", "starlette>=0.41", "uvicorn[standard]>=0.32"]
+dependencies = ["mcp>=1.28,<2.0", "pyyaml>=6.0", "starlette>=0.41", "uvicorn[standard]>=0.32"]
 
 [build-system]
 requires = ["setuptools>=68"]

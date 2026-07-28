@@ -10,15 +10,28 @@ prompt, REST facade and cross-client write/read verified locally.
 ## Run locally
 
 ```bash
-pip install -r requirements.txt
+python3 -m venv .venv
+source .venv/bin/activate              # Windows: .venv\Scripts\activate
+python3 -m pip install -r requirements.txt
 export ATLAS_TOKEN=$(openssl rand -base64 24 | tr -d '/+=')
 export ATLAS_ROOT=./data ATLAS_GIT=1
-python -m atlas_mcp.app          # prints the MCP URL, listens on :8787
-python tests/test_store.py       # store unit tests
-python tests/test_e2e.py         # full MCP + REST round trip (server must run)
+python3 -m atlas_mcp.app          # prints the MCP URL, listens on :8787
+python3 tests/test_store.py      # store unit tests
+python3 tests/test_e2e.py        # full MCP + REST round trip (server must run)
 ```
 
 `ATLAS_GIT=1` commits every write to `$ATLAS_ROOT` — run `git init` there first.
+
+**Troubleshooting:**
+- `error: externally-managed-environment` from pip means you're not inside
+  the venv — run `source .venv/bin/activate` (you should see `(.venv)` in
+  your prompt) rather than forcing the install with `--break-system-packages`
+  or `sudo`.
+- Packages installed but `atlas_mcp.app` still reports one as missing
+  usually means `pip`/`python3` on your PATH resolve to two different
+  Python installs. Always invoke both through the same interpreter —
+  `python3 -m pip install ...` and `python3 -m atlas_mcp.app` — rather than
+  the bare `pip`/`python` commands, and this can't happen.
 
 ## Deploy on your server
 
