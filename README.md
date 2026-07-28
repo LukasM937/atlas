@@ -67,7 +67,11 @@ Two things Anthropic's docs make non-negotiable:
 
 1. On **claude.ai** (web or desktop — not the phone): Customize → Connectors →
    "+" → *Add custom connector*.
-2. URL: `https://atlas.example.de/mcp/<ATLAS_TOKEN>/` (trailing slash).
+2. URL:
+   - GitHub OAuth mode (see Auth below): `https://atlas.example.de/mcp` — no
+     secret in the URL; Claude will redirect you through GitHub login on add.
+   - Path-secret mode (fallback): `https://atlas.example.de/mcp/<ATLAS_TOKEN>/`
+     (trailing slash).
 3. Add. Connectors are account-level, so once added it appears in the **iOS and
    Android apps** too — enable it per conversation via the "+" → Connectors
    toggle. Adding a *custom* connector is a web/desktop action; using it is not.
@@ -90,23 +94,28 @@ in the response, but excluded inside the store. Writes containing identifiers
 optional metadata-only audit log records tool, project and outcome, never
 content. Full threat model and policy in `SECURITY.md`.
 
-## Auth: what this test does, and the upgrade path
+## Auth
 
-Claude's connector dialog only accepts a URL plus optional OAuth client
-ID/secret — there is no field for a static bearer token. So the first test uses
-an unguessable path segment as the credential (`/mcp/<48-bit-plus-secret>/`)
-and a Bearer header for the REST side. That is adequate for a personal server
-over TLS with IP allowlisting, and inadequate as a permanent answer: the secret
-appears in server logs and cannot be rotated per client.
+Two schemes for the MCP endpoint, controlled by whether four env vars are
+set (`ATLAS_PUBLIC_URL`, `ATLAS_GITHUB_CLIENT_ID`, `ATLAS_GITHUB_CLIENT_SECRET`,
+`ATLAS_GITHUB_ALLOWED_USER` — see `deploy/atlas.env.example`):
 
-Upgrade path, in order of effort:
+- **Unset (default): path-secret.** An unguessable path segment as the
+  credential (`/mcp/<48-bit-plus-secret>/`). Originally assumed adequate on
+  its own; in practice both Claude and ChatGPT's connector setup attempt
+  OAuth discovery/registration regardless and fail outright if none exists.
+  Kept as a fallback, not a recommended steady state — see
+  `docs/ADR-001-auth.md`.
+- **Set: GitHub-backed OAuth**, on a fixed `/mcp` path (no secret in the
+  URL). A real OAuth 2.1 + PKCE + dynamic client registration flow, proxied
+  to GitHub for the actual login — GitHub here only proves identity;
+  `ATLAS_GITHUB_ALLOWED_USER` is the single account allowed through.
+  Full reasoning, and why not the standalone `fastmcp` package's
+  `OAuthProxy`, in `docs/ADR-001-auth.md`.
 
-1. Keep the secret path, add fail2ban + Anthropic IP allowlist. (30 min)
-2. Front it with an OAuth proxy (e.g. `fastmcp`'s `OAuthProxy` against GitHub
-   or your own Authentik/Keycloak). Claude then runs a normal OAuth flow and
-   you can revoke per client. (an evening)
-3. Full OAuth 2.1 with dynamic client registration in-process, per MCP spec
-   2025-06-18. (a weekend; only worth it if others use the server)
+REST (`/api/*`) is unaffected either way — still a static Bearer
+(`ATLAS_TOKEN`), which has worked fine for ChatGPT Actions/scripts so far;
+revisit only if that changes.
 
 ## Seed and render
 

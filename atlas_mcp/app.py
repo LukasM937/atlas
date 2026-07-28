@@ -1,14 +1,20 @@
 """ASGI entrypoint.
 
 Routes
-  /mcp/{ATLAS_TOKEN}/     streamable HTTP MCP endpoint  -> Claude custom connector
-  /api/...                REST facade                   -> ChatGPT Actions, curl, RAG
-  /openapi.json           schema for the REST facade
-  /healthz                liveness
+  /mcp                       streamable HTTP MCP endpoint, OAuth-protected
+                              (when ATLAS_PUBLIC_URL/ATLAS_GITHUB_* are set)
+  /mcp/{ATLAS_TOKEN}/        streamable HTTP MCP endpoint, path-secret scheme
+                              (fallback when OAuth env vars are unset)
+  /oauth/github/callback     GitHub login redirect target, only when OAuth is on
+  /api/...                   REST facade                   -> ChatGPT Actions, curl, RAG
+  /openapi.json              schema for the REST facade
+  /healthz                   liveness
 
-Auth for the first test is a single shared secret: an unguessable path segment
-for MCP (Claude's connector UI has no field for a static bearer token) and a
-Bearer header for REST. See README for the OAuth upgrade path.
+Only one of the two /mcp mounts is ever live: FastMCP's own auth middleware
+applies to the whole app instance uniformly, so there is no way to run the
+same instance with OAuth on one path and the old path-secret on another.
+Set the OAuth env vars to switch over; unset them to revert instantly (a
+redeploy, nothing else) — see docs/ADR-001-auth.md.
 """
 
 from __future__ import annotations
@@ -22,11 +28,13 @@ from starlette.applications import Starlette
 from starlette.middleware import Middleware
 from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
-from starlette.responses import JSONResponse, PlainTextResponse
+from starlette.responses import JSONResponse, PlainTextResponse, RedirectResponse
 from starlette.routing import Mount, Route
 from starlette.types import ASGIApp, Receive, Scope, Send
 
-from .server import mcp, store
+from mcp.server.auth.provider import AuthorizeError
+
+from .server import OAUTH_ENABLED, mcp, oauth_provider, store
 from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
 
 TOKEN = os.environ.get("ATLAS_TOKEN") or secrets.token_urlsafe(24)
@@ -243,6 +251,27 @@ async def on_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"error": str(exc) or type(exc).__name__}, status_code=status)
 
 
+async def github_oauth_callback(request: Request):
+    """GitHub redirects here after the user approves/denies login. Exchanges
+    the GitHub code, checks identity against the allow-listed user, and
+    redirects back to the MCP client's own redirect_uri with our code."""
+    code = request.query_params.get("code")
+    github_state = request.query_params.get("state")
+    if not code or not github_state:
+        return PlainTextResponse("Missing code or state.", status_code=400)
+    assert oauth_provider is not None  # route only mounted when OAUTH_ENABLED
+    try:
+        redirect_url = await oauth_provider.complete_github_login(code, github_state)
+    except AuthorizeError as e:
+        return PlainTextResponse(f"Login failed: {e.error_description or e.error}", status_code=403)
+    return RedirectResponse(redirect_url, status_code=302)
+
+
+# Only one of these two /mcp mounts is ever added — see module docstring.
+mcp_mount = Mount("/mcp", app=mcp.streamable_http_app()) if OAUTH_ENABLED else Mount(
+    f"/mcp/{TOKEN}", app=mcp.streamable_http_app()
+)
+
 routes = [
     Route("/healthz", healthz),
     Route("/openapi.json", openapi),
@@ -251,8 +280,10 @@ routes = [
     Route("/api/search", api_search, methods=["GET"]),
     Route("/api/projects/{project_id}", api_get, methods=["GET"]),
     Route("/api/projects/{project_id}/entries", api_append, methods=["POST"]),
-    Mount(f"/mcp/{TOKEN}", app=mcp.streamable_http_app()),
+    mcp_mount,
 ]
+if OAUTH_ENABLED:
+    routes.append(Route("/oauth/github/callback", github_oauth_callback))
 
 app = Starlette(
     routes=routes,
@@ -269,5 +300,9 @@ app = Starlette(
 if __name__ == "__main__":
     import uvicorn
 
-    print(f"MCP endpoint:  http://127.0.0.1:8787/mcp/{TOKEN}/")
-    uvicorn.run(app, host="0.0.0.0", port=int(os.environ.get("PORT", 8787)))
+    port = int(os.environ.get("PORT", 8787))
+    if OAUTH_ENABLED:
+        print(f"MCP endpoint:  http://127.0.0.1:{port}/mcp  (OAuth, GitHub login required)")
+    else:
+        print(f"MCP endpoint:  http://127.0.0.1:{port}/mcp/{TOKEN}/")
+    uvicorn.run(app, host="0.0.0.0", port=port)

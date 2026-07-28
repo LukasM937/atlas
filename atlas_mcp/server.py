@@ -13,9 +13,13 @@ import json
 import os
 from typing import Annotated, Any, Literal, Optional
 
+from pathlib import Path
+
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
 from pydantic import BaseModel, ConfigDict, Field
 
+from .github_oauth import GitHubOAuthProvider
 from .store import (
     ENTRY_KINDS,
     PRIORITY,
@@ -37,6 +41,28 @@ ATLAS_GIT = os.environ.get("ATLAS_GIT", "0") == "1"
 # anything classified higher is invisible to it, not merely hidden.
 ATLAS_MAX_SENSITIVITY = os.environ.get("ATLAS_MAX_SENSITIVITY", "internal")
 store = AtlasStore(ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY)
+
+# --- OAuth (Phase 4) -------------------------------------------------------
+# Entirely optional: unset any of these and the server falls back to the
+# original /mcp/<token>/ path-secret scheme with no auth wired into FastMCP
+# itself. Set all four to switch this instance over to GitHub-backed OAuth —
+# see docs/ADR-001-auth.md for why GitHub and why this shape.
+ATLAS_PUBLIC_URL = os.environ.get("ATLAS_PUBLIC_URL", "").rstrip("/")
+GITHUB_CLIENT_ID = os.environ.get("ATLAS_GITHUB_CLIENT_ID", "")
+GITHUB_CLIENT_SECRET = os.environ.get("ATLAS_GITHUB_CLIENT_SECRET", "")
+GITHUB_ALLOWED_USER = os.environ.get("ATLAS_GITHUB_ALLOWED_USER", "")
+
+OAUTH_ENABLED = bool(ATLAS_PUBLIC_URL and GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET and GITHUB_ALLOWED_USER)
+
+oauth_provider: GitHubOAuthProvider | None = None
+if OAUTH_ENABLED:
+    oauth_provider = GitHubOAuthProvider(
+        state_path=Path(ATLAS_ROOT) / "oauth_state.json",
+        client_id=GITHUB_CLIENT_ID,
+        client_secret=GITHUB_CLIENT_SECRET,
+        allowed_user=GITHUB_ALLOWED_USER,
+        callback_url=f"{ATLAS_PUBLIC_URL}/oauth/github/callback",
+    )
 
 _audit_path = os.environ.get("ATLAS_AUDIT_LOG", "")
 
@@ -93,6 +119,21 @@ mcp = FastMCP(
     stateless_http=True,
     json_response=True,
     streamable_http_path="/",
+    auth_server_provider=oauth_provider,
+    auth=AuthSettings(
+        # FastMCP mounts /authorize, /token, /register, /revoke relative to
+        # wherever its own ASGI app is mounted in app.py (Mount("/mcp", ...)),
+        # so the issuer/resource URLs must include that prefix or the
+        # metadata document advertises endpoints that 404.
+        issuer_url=f"{ATLAS_PUBLIC_URL}/mcp",
+        resource_server_url=f"{ATLAS_PUBLIC_URL}/mcp",
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True, valid_scopes=["mcp"], default_scopes=["mcp"]
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+    )
+    if OAUTH_ENABLED
+    else None,
 )
 
 # --------------------------------------------------------------------------

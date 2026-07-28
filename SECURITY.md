@@ -112,9 +112,17 @@ the live host — not currently a real control there, only a planned one.
 Data: store mode 0700; encrypted off-box backups with a tested restore; git
 history in the store repo as the tamper-evident record.
 
-Auth: the secret-path scheme is a stopgap with a known weakness — it cannot be
-rotated per client and it lives in a URL. Phase 4 replaces it with OAuth while
-keeping the IP allowlist, so that neither control is load-bearing alone.
+Auth: Phase 4 implemented, rolling out. GitHub-backed OAuth (identity check
+only — one allow-listed username, no authorization scope beyond that) is
+available on a fixed `/mcp` path when `ATLAS_PUBLIC_URL`/`ATLAS_GITHUB_*` are
+set; see `docs/ADR-001-auth.md`. The original secret-path scheme
+(`/mcp/<token>/`) remains the default until OAuth is confirmed working from
+a real client, since it turned out to be required for basic connectivity,
+not just an optional hardening step — both Claude and ChatGPT's connector
+setup attempt OAuth discovery and fail outright without it. Once confirmed,
+the Anthropic IP allowlist on `/mcp/` comes off (it would otherwise block
+the OAuth login step itself, which is a browser redirect from the user's own
+IP, not Anthropic's range) and the path-secret scheme is retired.
 
 ## What is deliberately *not* claimed
 
