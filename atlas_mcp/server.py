@@ -15,8 +15,11 @@ from typing import Annotated, Any, Literal, Optional
 
 from pathlib import Path
 
+from urllib.parse import urlparse
+
 from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.fastmcp import FastMCP
+from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field
 
 from .github_oauth import GitHubOAuthProvider
@@ -113,15 +116,41 @@ Rules for every assistant using this connector:
 Sections available per project: {', '.join(SECTIONS)} plus an append-only Log.
 """.strip()
 
+# FastMCP auto-enables DNS-rebinding protection restricted to localhost
+# whenever its own (unrelated to us) `host` constructor arg defaults to
+# "127.0.0.1" -- which it always does here, since we don't set it. Left
+# implicit, every real request's Host: atlas.muehrke.de gets rejected with
+# 421 "Invalid Host header", regardless of auth -- confirmed in practice.
+# Configure it explicitly instead, for the actual public hostname.
+_public_host = urlparse(ATLAS_PUBLIC_URL).hostname if ATLAS_PUBLIC_URL else None
+transport_security = (
+    TransportSecuritySettings(
+        enable_dns_rebinding_protection=True,
+        allowed_hosts=[_public_host, f"{_public_host}:*"],
+        allowed_origins=[ATLAS_PUBLIC_URL],
+    )
+    if _public_host
+    else None
+)
+
 mcp = FastMCP(
     "atlas_mcp",
     instructions=INSTRUCTIONS,
     stateless_http=True,
     json_response=True,
+    # Not "127.0.0.1" (FastMCP's own default): app.py always runs this under
+    # uvicorn/Apache, never FastMCP's own standalone dev server, so this
+    # value itself is inert -- it only matters because FastMCP auto-enables
+    # its localhost-only transport_security default when host is a
+    # loopback value, which would otherwise override our own explicit
+    # config below (or silently leave old path-secret mode with no domain
+    # to configure it for at all).
+    host="0.0.0.0",
     # OAuth mode: a literal absolute path, flattened directly into app.py's
     # routes (no Mount wrapper) -- see the comment there for why. Old
     # path-secret mode: "/" as before, used inside a Mount(f"/mcp/{TOKEN}").
     streamable_http_path="/mcp" if OAUTH_ENABLED else "/",
+    transport_security=transport_security,
     auth_server_provider=oauth_provider,
     auth=AuthSettings(
         # Root-level: /authorize, /token, /register, /revoke, and the AS
