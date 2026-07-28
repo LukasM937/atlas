@@ -267,11 +267,6 @@ async def github_oauth_callback(request: Request):
     return RedirectResponse(redirect_url, status_code=302)
 
 
-# Only one of these two /mcp mounts is ever added — see module docstring.
-mcp_mount = Mount("/mcp", app=mcp.streamable_http_app()) if OAUTH_ENABLED else Mount(
-    f"/mcp/{TOKEN}", app=mcp.streamable_http_app()
-)
-
 routes = [
     Route("/healthz", healthz),
     Route("/openapi.json", openapi),
@@ -280,35 +275,26 @@ routes = [
     Route("/api/search", api_search, methods=["GET"]),
     Route("/api/projects/{project_id}", api_get, methods=["GET"]),
     Route("/api/projects/{project_id}/entries", api_append, methods=["POST"]),
-    mcp_mount,
 ]
+
 if OAUTH_ENABLED:
+    # Flattened, not mounted: a Mount("/mcp", app=...) requires a literal "/"
+    # after the prefix to match at all (Starlette's Mount compiles
+    # "<path>/{path:path}") -- a bare POST /mcp with no trailing slash
+    # doesn't match, and redirecting to add one doesn't help either, since
+    # (confirmed in practice) at least one real MCP client doesn't follow
+    # redirects on POST: the whole OAuth handshake can succeed and the
+    # actual tool call still fails right after. FastMCP already built each
+    # of its routes (the MCP endpoint itself via streamable_http_path,
+    # authorize/token/register/revoke, both metadata documents) as literal
+    # absolute-feeling paths matching issuer_url/resource_server_url in
+    # server.py -- extending our own routes with them directly, instead of
+    # wrapping the whole app in an extra prefix, makes those paths and the
+    # advertised URLs actually agree with each other.
+    routes.extend(mcp.streamable_http_app().routes)
     routes.append(Route("/oauth/github/callback", github_oauth_callback))
-
-    # FastMCP auto-generates an RFC 9728 "protected resource metadata" route
-    # too, but its path is computed FROM the resource URL (already includes
-    # "/mcp") and then gets mounted again under our own Mount("/mcp", ...),
-    # landing at /mcp/.well-known/oauth-protected-resource/mcp -- not the
-    # root-relative path (/.well-known/oauth-protected-resource/mcp) a
-    # spec-following client actually requests. Re-registered here at the
-    # correct top-level path with the same content, bypassing the buried,
-    # unreachable copy FastMCP built internally.
-    from urllib.parse import urlparse
-
-    from mcp.server.auth.handlers.metadata import ProtectedResourceMetadataHandler
-    from mcp.server.auth.routes import build_resource_metadata_url
-    from mcp.shared.auth import ProtectedResourceMetadata
-
-    _resource_url = f"{ATLAS_PUBLIC_URL}/mcp"
-    _prm_handler = ProtectedResourceMetadataHandler(
-        ProtectedResourceMetadata(
-            resource=_resource_url,
-            authorization_servers=[_resource_url],
-            scopes_supported=["mcp"],
-        )
-    )
-    _prm_path = urlparse(str(build_resource_metadata_url(_resource_url))).path
-    routes.append(Route(_prm_path, endpoint=_prm_handler.handle, methods=["GET", "OPTIONS"]))
+else:
+    routes.append(Mount(f"/mcp/{TOKEN}", app=mcp.streamable_http_app()))
 
 app = Starlette(
     routes=routes,

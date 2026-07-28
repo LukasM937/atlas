@@ -118,14 +118,21 @@ mcp = FastMCP(
     instructions=INSTRUCTIONS,
     stateless_http=True,
     json_response=True,
-    streamable_http_path="/",
+    # OAuth mode: a literal absolute path, flattened directly into app.py's
+    # routes (no Mount wrapper) -- see the comment there for why. Old
+    # path-secret mode: "/" as before, used inside a Mount(f"/mcp/{TOKEN}").
+    streamable_http_path="/mcp" if OAUTH_ENABLED else "/",
     auth_server_provider=oauth_provider,
     auth=AuthSettings(
-        # FastMCP mounts /authorize, /token, /register, /revoke relative to
-        # wherever its own ASGI app is mounted in app.py (Mount("/mcp", ...)),
-        # so the issuer/resource URLs must include that prefix or the
-        # metadata document advertises endpoints that 404.
-        issuer_url=f"{ATLAS_PUBLIC_URL}/mcp",
+        # Root-level: /authorize, /token, /register, /revoke, and the AS
+        # metadata document all end up as literal top-level paths once
+        # app.py flattens this app's routes instead of mounting it under a
+        # prefix (see app.py) -- issuer_url must match where they actually
+        # end up, not include /mcp.
+        issuer_url=ATLAS_PUBLIC_URL,
+        # The resource itself is still genuinely at /mcp -- this drives the
+        # RFC 9728 protected-resource metadata path and content, independent
+        # of where the AS's own operational endpoints live.
         resource_server_url=f"{ATLAS_PUBLIC_URL}/mcp",
         client_registration_options=ClientRegistrationOptions(
             enabled=True, valid_scopes=["mcp"], default_scopes=["mcp"]
