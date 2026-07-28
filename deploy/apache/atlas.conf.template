@@ -1,16 +1,16 @@
-# /etc/apache2/sites-available/atlas.muehrke.de.conf
+# /etc/apache2/sites-available/__DOMAIN__.conf
 #
-# Order of operations:
-#   1. a2enmod proxy proxy_http headers ssl http2 rewrite
-#   2. deploy this file with ONLY the :80 vhost, a2ensite, reload
-#   3. certbot --apache -d atlas.muehrke.de   (writes the :443 vhost)
-#   4. merge the :443 block below into certbot's -le-ssl.conf, keep certbot's
-#      SSLCertificateFile lines, then: apache2ctl configtest && systemctl reload apache2
+# Generated from this template by deploy/setup.sh, which substitutes
+# __DOMAIN__ and handles the certbot bootstrap order (minimal :80 vhost ->
+# `certbot certonly --apache` for the cert files only -> this full vhost).
+# Deploying by hand: `certbot certonly` (not `--apache`/`--nginx` autoconfig)
+# gets you the cert files at the paths below without certbot touching Apache
+# config at all — simplest to reason about, run configtest before reload.
 #
 # The backend binds 127.0.0.1:8787 and is never exposed directly.
 
 <VirtualHost *:80>
-    ServerName atlas.muehrke.de
+    ServerName __DOMAIN__
     # ACME http-01 must stay reachable; everything else is redirected.
     RewriteEngine On
     RewriteCond %{REQUEST_URI} !^/\.well-known/acme-challenge/
@@ -18,14 +18,16 @@
 </VirtualHost>
 
 <VirtualHost *:443>
-    ServerName atlas.muehrke.de
+    ServerName __DOMAIN__
 
     SSLEngine on
     SSLProtocol -all +TLSv1.2 +TLSv1.3
     SSLHonorCipherOrder off
     SSLSessionTickets off
     Protocols h2 http/1.1
-    # SSLCertificateFile / SSLCertificateKeyFile: leave certbot's lines in place
+    SSLCertificateFile /etc/letsencrypt/live/__DOMAIN__/fullchain.pem
+    SSLCertificateKeyFile /etc/letsencrypt/live/__DOMAIN__/privkey.pem
+    Include /etc/letsencrypt/options-ssl-apache.conf
 
     Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains"
     Header always set X-Content-Type-Options "nosniff"

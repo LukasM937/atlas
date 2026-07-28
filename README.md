@@ -36,12 +36,23 @@ python3 tests/test_e2e.py        # full MCP + REST round trip (server must run)
 ## Deploy on your server
 
 ```bash
-docker compose up -d             # app on :8787, bind-mounts ./data
+sudo ./deploy/setup.sh --domain atlas.example.com [--email <your-email>]
 ```
 
-Put it behind TLS on a subdomain. Apache vhost, systemd unit, ufw script,
-fail2ban jail and backup script are in `deploy/`; the deployment order and the
-acceptance criteria for each step are in `TODO.md`. Read `SECURITY.md` first.
+Builds and starts the app via Docker Compose (`docker-compose.yml`, app on
+:8787 loopback-only, bind-mounts `./data`), generates an Apache vhost for the
+given domain from `deploy/apache/atlas.conf.template`, bootstraps a TLS cert
+via certbot if none exists yet, then checks connectivity — local first, then
+this host's own view of the public hostname. Idempotent, safe to re-run
+(e.g. after `git pull`). Does not touch `ufw` or install `fail2ban` — see
+what it prints at the end for those as manual, reviewed steps, especially if
+this host runs anything else (its ufw rules are almost certainly not just
+about this app).
+
+Read `SECURITY.md` first. The systemd unit, ufw script, fail2ban jail and
+backup script in `deploy/` are for a single-purpose, non-Docker host instead
+of the Compose path above; the deployment order and acceptance criteria for
+each are in `TODO.md`.
 
 Two things Anthropic's docs make non-negotiable:
 

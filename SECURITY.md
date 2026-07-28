@@ -84,17 +84,30 @@ costs one rephrase; a false negative is a disclosure that cannot be recalled.
 - Store writes are atomic (`os.replace`) under an flock, so a crash mid-write
   cannot truncate a note.
 
-## Controls to be applied (host) — see TODO.md phases 2–4
+## Controls applied on the host — see TODO.md phases 2–4
 
-Service: dedicated system user, `127.0.0.1:8787` bind, systemd sandbox
-(`ProtectSystem=strict`, `PrivateTmp`, `NoNewPrivileges`, restricted syscalls),
-code read-only to the service user, secrets in a root-owned `EnvironmentFile`.
+Two deployment paths exist; **the actual deployed instance uses the first.**
 
-Network: ufw default-deny with only 22/80/443; Apache terminating TLS 1.2/1.3
-with HSTS; `Require ip 160.79.104.0/21` on `/mcp/` (Anthropic's published
-outbound range — verify before applying, it can change); `/healthz` restricted
-to localhost; split access logs so the token-bearing path is never written to
-disk; fail2ban on 401/403 bursts.
+- **Docker Compose** (`docker-compose.yml`, `deploy/setup.sh`): containment is
+  Docker's own container isolation, not a systemd sandbox — there is no
+  dedicated system user or `ProtectSystem=strict` here, do not assume there
+  is. `127.0.0.1:8787` bind and secrets via `.env` (0600, gitignored) still
+  hold. This is what's live on the current host, which also runs several
+  other services (Nextcloud AIO, Signal API, Open WebUI, Ollama...) — its
+  `ufw` ruleset is managed for all of them, not just this app.
+- **systemd** (`deploy/systemd/atlas.service`, not currently deployed
+  anywhere): dedicated system user, systemd sandbox (`ProtectSystem=strict`,
+  `PrivateTmp`, `NoNewPrivileges`, restricted syscalls), code read-only to the
+  service user, secrets in a root-owned `EnvironmentFile`. Use this path on a
+  single-purpose host instead of Docker.
+
+Network (either path): `Require ip 160.79.104.0/21` on `/mcp/` (Anthropic's
+published outbound range — verify before applying, it can change); `/api` and
+`/openapi.json` are public by design (§ REST decision below); Apache
+terminating TLS 1.2/1.3 with HSTS; `/healthz` restricted to localhost; split
+access logs so the token-bearing path is never written to disk. `fail2ban` on
+401/403 bursts is written (`deploy/fail2ban/`) but **not yet installed** on
+the live host — not currently a real control there, only a planned one.
 
 Data: store mode 0700; encrypted off-box backups with a tested restore; git
 history in the store repo as the tamper-evident record.
