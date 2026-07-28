@@ -1,0 +1,4 @@
+mcp>=1.28
+pyyaml>=6.0
+starlette>=0.41
+uvicorn[standard]>=0.32

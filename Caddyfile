@@ -1,0 +1,9 @@
+atlas.example.de {
+    encode zstd gzip
+    # optional hardening: only let Anthropic's ranges reach the MCP path
+    # @notanthropic not remote_ip 160.79.104.0/23
+    # handle /mcp/* { respond @notanthropic 403 }
+    reverse_proxy localhost:8787 {
+        flush_interval -1        # do not buffer SSE / streaming responses
+    }
+}

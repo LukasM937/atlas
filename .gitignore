@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+.env
+*.egg-info/
+data/
+PROJECT_ATLAS.md

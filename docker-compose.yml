@@ -1,0 +1,12 @@
+services:
+  atlas:
+    build: .
+    restart: unless-stopped
+    environment:
+      ATLAS_TOKEN: ${ATLAS_TOKEN:?set ATLAS_TOKEN in .env}
+      ATLAS_ROOT: /data
+      ATLAS_GIT: "1"
+    volumes:
+      - ./data:/data
+    ports:
+      - "127.0.0.1:8787:8787"
