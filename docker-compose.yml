@@ -6,6 +6,13 @@ services:
       ATLAS_TOKEN: ${ATLAS_TOKEN:?set ATLAS_TOKEN in .env}
       ATLAS_ROOT: /data
       ATLAS_GIT: "1"
+      # Phase 4 OAuth — all optional, all-or-nothing (see docs/ADR-001-auth.md).
+      # Vars in .env aren't auto-injected into the container; each one used
+      # by the app must be listed here explicitly or it's silently empty.
+      ATLAS_PUBLIC_URL: ${ATLAS_PUBLIC_URL:-}
+      ATLAS_GITHUB_CLIENT_ID: ${ATLAS_GITHUB_CLIENT_ID:-}
+      ATLAS_GITHUB_CLIENT_SECRET: ${ATLAS_GITHUB_CLIENT_SECRET:-}
+      ATLAS_GITHUB_ALLOWED_USER: ${ATLAS_GITHUB_ALLOWED_USER:-}
     volumes:
       - ./data:/data
     ports:
