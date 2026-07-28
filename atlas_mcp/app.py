@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import os
 import secrets
+import time
+from collections import defaultdict, deque
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -22,11 +24,69 @@ from starlette.middleware.cors import CORSMiddleware
 from starlette.requests import Request
 from starlette.responses import JSONResponse, PlainTextResponse
 from starlette.routing import Mount, Route
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from .server import mcp, store
 from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
 
 TOKEN = os.environ.get("ATLAS_TOKEN") or secrets.token_urlsafe(24)
+
+# 1 MB matches the Apache vhost's LimitRequestBody; kept here too so the app
+# is safe standalone (docker compose exposes it with no Apache in front).
+MAX_BODY_BYTES = int(os.environ.get("ATLAS_MAX_BODY_BYTES", 1_048_576))
+# per-IP request budget; ponytail: in-process dict, fine for one instance —
+# move to a shared store if this ever runs behind multiple workers.
+RATE_LIMIT = int(os.environ.get("ATLAS_RATE_LIMIT_PER_MIN", 120))
+_hits: dict[str, deque[float]] = defaultdict(deque)
+
+
+class BodySizeLimitMiddleware:
+    """Reject oversized request bodies with 413, checked via Content-Length.
+    # ponytail: trusts the header rather than metering the stream byte-by-byte;
+    # a client that lies about Content-Length and streams past it anyway gets
+    # caught by Apache's LimitRequestBody in front. Add stream metering here
+    # too if this app is ever run with no reverse proxy in front of it.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        headers = dict(scope.get("headers") or [])
+        length = headers.get(b"content-length")
+        if length is not None and int(length) > MAX_BODY_BYTES:
+            response = JSONResponse({"error": "request body too large"}, status_code=413)
+            await response(scope, receive, send)
+            return
+        await self.app(scope, receive, send)
+
+
+class RateLimitMiddleware:
+    """Simple per-IP sliding window; fail2ban handles sustained abuse, this
+    catches a single client hammering the API within its ban threshold."""
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            return await self.app(scope, receive, send)
+
+        client = scope.get("client")
+        ip = client[0] if client else "unknown"
+        now = time.monotonic()
+        window = _hits[ip]
+        while window and now - window[0] > 60:
+            window.popleft()
+        if len(window) >= RATE_LIMIT:
+            response = JSONResponse({"error": "rate limit exceeded"}, status_code=429)
+            await response(scope, receive, send)
+            return
+        window.append(now)
+        await self.app(scope, receive, send)
 
 
 def _auth(request: Request) -> None:
@@ -73,13 +133,20 @@ async def api_append(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "id": p.id})
 
 
+# Same fields the MCP UpsertInput model accepts — keeps the REST facade from
+# writing arbitrary caller-supplied keys into stored frontmatter unchecked.
+ALLOWED_META_FIELDS = (
+    "name", "status", "priority", "category", "completion", "tags", "links", "sensitivity",
+)
+
+
 async def api_upsert(request: Request) -> JSONResponse:
     _auth(request)
     body = await request.json()
     pid = slugify(body["id"])
     if store.exists(pid):
         p = store.load(pid)
-        p.meta.update({k: v for k, v in body.items() if k not in ("id", "section", "content")})
+        p.meta.update({k: v for k, v in body.items() if k in ALLOWED_META_FIELDS})
     else:
         p = Project(
             id=pid,
@@ -92,6 +159,7 @@ async def api_upsert(request: Request) -> JSONResponse:
                 "created": utcnow(),
                 "tags": body.get("tags", []),
                 "links": body.get("links", []),
+                "sensitivity": body.get("sensitivity", "internal"),
             },
             body=new_project_body(body.get("summary", "")),
         )
@@ -163,7 +231,15 @@ async def openapi(request: Request) -> JSONResponse:
 
 
 async def on_error(request: Request, exc: Exception) -> JSONResponse:
-    status = {AtlasError: 400, PermissionError: 401, KeyError: 400}.get(type(exc), 500)
+    # Only these are guaranteed to carry a safe, actionable message (see
+    # AtlasError/PermissionError callsites). Anything else is unclassified —
+    # it might be a FileNotFoundError or similar carrying a filesystem path,
+    # so it gets a generic body instead of str(exc). Never leak stack traces
+    # or paths to the client (CLAUDE.md invariant #6).
+    known = {AtlasError: 400, PermissionError: 401, KeyError: 400}
+    status = known.get(type(exc))
+    if status is None:
+        return JSONResponse({"error": "internal error"}, status_code=500)
     return JSONResponse({"error": str(exc) or type(exc).__name__}, status_code=status)
 
 
@@ -184,7 +260,9 @@ app = Starlette(
     exception_handlers={Exception: on_error, AtlasError: on_error, PermissionError: on_error},
     middleware=[
         Middleware(CORSMiddleware, allow_origins=["*"], allow_methods=["*"],
-                   allow_headers=["*"], expose_headers=["mcp-session-id"])
+                   allow_headers=["*"], expose_headers=["mcp-session-id"]),
+        Middleware(RateLimitMiddleware),
+        Middleware(BodySizeLimitMiddleware),
     ],
 )
 

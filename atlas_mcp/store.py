@@ -23,6 +23,8 @@ import yaml
 # --- vocabulary (kept in sync with PROJECT_ATLAS.md) -------------------------
 
 STATUS = ["concept", "active", "advanced", "completed", "production", "archived"]
+# ordered least -> most restricted; anything unrecognised is treated as "secret"
+SENSITIVITY = ["public", "internal", "confidential", "secret"]
 PRIORITY = ["S", "A", "B", "C", "D"]
 ENTRY_KINDS = ["decision", "note", "log", "question", "result", "idea"]
 
@@ -50,6 +52,39 @@ def utcnow() -> str:
 
 class AtlasError(ValueError):
     """Raised with an actionable message the model can act on."""
+
+
+class AtlasDenied(AtlasError):
+    """Raised when a record exists but is above the server's clearance."""
+
+
+# Ingress tripwire. Patterns that must never enter a store that gets shipped to
+# a third-party model. Deliberately noisy: a false positive costs one rephrase,
+# a false negative costs a disclosure.
+PII_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("IBAN", re.compile(r"\b[A-Z]{2}\d{2}(?:[ ]?[A-Z0-9]{4}){2,7}\b")),
+    ("credit card", re.compile(r"\b(?:\d[ -]?){13,19}\b")),
+    ("German tax/social id", re.compile(r"\b\d{2} ?\d{6} ?\d{3}\b")),
+    ("email address", re.compile(r"\b[\w.+-]+@[\w-]+\.[A-Za-z]{2,}\b")),
+    ("phone number", re.compile(r"(?:\+49|0049|\b0)[\d /-]{8,}\d\b")),
+    ("private key", re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----")),
+    ("API token", re.compile(r"\b(?:sk-|ghp_|gho_|xox[baprs]-|AKIA|AIza)[A-Za-z0-9_\-]{10,}")),
+    ("JWT", re.compile(r"\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}")),
+    ("date of birth", re.compile(r"\b(?:geb\.?|geboren am|DOB)[: ]+\d", re.I)),
+]
+
+
+def scan_pii(text: str) -> list[str]:
+    """Return the names of tripwire patterns found in text."""
+    return sorted({name for name, rx in PII_PATTERNS if rx.search(text)})
+
+
+def sensitivity_rank(value: str | None) -> int:
+    """Fail closed: unknown labels rank as the most restricted level."""
+    try:
+        return SENSITIVITY.index(value or "internal")
+    except ValueError:
+        return len(SENSITIVITY) - 1
 
 
 @dataclass
@@ -101,11 +136,25 @@ class Project:
 
 
 class AtlasStore:
-    def __init__(self, root: str | Path, git: bool = False) -> None:
+    def __init__(
+        self,
+        root: str | Path,
+        git: bool = False,
+        max_sensitivity: str = "internal",
+        pii_guard: bool = True,
+    ) -> None:
         self.root = Path(root).expanduser().resolve()
         self.projects_dir = self.root / "projects"
         self.projects_dir.mkdir(parents=True, exist_ok=True)
         self.git = git
+        # Records above this level are invisible to every read path on this
+        # instance. Set per process, so an internet-facing server and a local
+        # CLI can point at the same directory with different clearances.
+        self.max_rank = sensitivity_rank(max_sensitivity)
+        self.pii_guard = pii_guard
+
+    def _visible(self, project: "Project") -> bool:
+        return sensitivity_rank(project.meta.get("sensitivity")) <= self.max_rank
 
     # --- io ---------------------------------------------------------------
 
@@ -128,9 +177,31 @@ class AtlasStore:
             )
         raw = path.read_text(encoding="utf-8")
         meta, body = _split_frontmatter(raw)
-        return Project(id=path.stem, meta=meta, body=body)
+        project = Project(id=path.stem, meta=meta, body=body)
+        if not self._visible(project):
+            raise AtlasDenied(
+                f"Project '{project.id}' is classified "
+                f"'{meta.get('sensitivity')}' and is not served by this instance. "
+                f"Read it locally instead."
+            )
+        return project
 
     def save(self, project: Project, message: str = "") -> Path:
+        if self.pii_guard:
+            found = scan_pii(project.body)
+            if found:
+                raise AtlasError(
+                    "Refused: the text contains " + ", ".join(found) + ". "
+                    "The Atlas is replicated to third-party model providers on "
+                    "every read, so identifiers must not be stored here. "
+                    "Reference the record instead (e.g. 'see Nextcloud/contracts/2026-03')."
+                )
+        if not self._visible(project):
+            raise AtlasDenied(
+                f"Refused: sensitivity '{project.meta.get('sensitivity')}' exceeds "
+                f"this instance's clearance ('{SENSITIVITY[self.max_rank]}')."
+            )
+        project.meta.setdefault("sensitivity", "internal")
         project.meta["updated"] = utcnow()
         path = self._path(project.id)
         _atomic_write(path, project.to_markdown())
@@ -143,8 +214,11 @@ class AtlasStore:
         for p in sorted(self.projects_dir.glob("*.md")):
             try:
                 meta, body = _split_frontmatter(p.read_text(encoding="utf-8"))
-                out.append(Project(id=p.stem, meta=meta, body=body))
-            except Exception:  # a broken file must not kill the whole listing
+                project = Project(id=p.stem, meta=meta, body=body)
+                if self._visible(project):
+                    out.append(project)
+            except Exception:  # a broken file must not kill the whole listing,
+                # but it must not leak its contents either
                 out.append(Project(id=p.stem, meta={"name": p.stem, "status": "broken"}))
         return out
 
@@ -220,7 +294,9 @@ def _split_frontmatter(raw: str) -> tuple[dict[str, Any], str]:
 
 def _atomic_write(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    lock = path.with_suffix(path.suffix + ".lock")
+    lockdir = path.parent / ".locks"
+    lockdir.mkdir(exist_ok=True)
+    lock = lockdir / (path.name + ".lock")
     with open(lock, "w") as lf:
         fcntl.flock(lf, fcntl.LOCK_EX)
         try:

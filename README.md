@@ -26,13 +26,9 @@ python tests/test_e2e.py         # full MCP + REST round trip (server must run)
 docker compose up -d             # app on :8787, bind-mounts ./data
 ```
 
-Put it behind TLS on a subdomain (Caddy example in `Caddyfile`):
-
-```
-atlas.example.de {
-    reverse_proxy localhost:8787
-}
-```
+Put it behind TLS on a subdomain. Apache vhost, systemd unit, ufw script,
+fail2ban jail and backup script are in `deploy/`; the deployment order and the
+acceptance criteria for each step are in `TODO.md`. Read `SECURITY.md` first.
 
 Two things Anthropic's docs make non-negotiable:
 
@@ -59,6 +55,17 @@ Custom GPT → Actions → import `https://atlas.example.de/openapi.json`, auth
 type Bearer, paste the same `ATLAS_TOKEN`. Local agents can either speak MCP at
 the same URL or just read `$ATLAS_ROOT/projects/*.md` off disk.
 
+## Security
+
+Short version: everything the connector can read is transmitted to a third-party
+model provider on every read, so classification comes before cryptography.
+Projects carry a `sensitivity` label; the internet-facing process runs at
+`internal` clearance and records above it are invisible to it — not filtered
+in the response, but excluded inside the store. Writes containing identifiers
+(IBAN, card, e-mail, phone, tax id, keys, tokens, JWT, DOB) are rejected. An
+optional metadata-only audit log records tool, project and outcome, never
+content. Full threat model and policy in `SECURITY.md`.
+
 ## Auth: what this test does, and the upgrade path
 
 Claude's connector dialog only accepts a URL plus optional OAuth client
@@ -77,12 +84,32 @@ Upgrade path, in order of effort:
 3. Full OAuth 2.1 with dynamic client registration in-process, per MCP spec
    2025-06-18. (a weekend; only worth it if others use the server)
 
+## Seed and render
+
+```bash
+python -m atlas_mcp.seed import seed/PROJECT_ATLAS.seed.md   # 43 projects, idempotent
+python -m atlas_mcp.seed render PROJECT_ATLAS.md             # derived single-file view
+```
+
+`seed/PROJECT_ATLAS.seed.md` is one file containing every project file, split on
+`<!-- project: id -->` markers. Import skips ids that already exist, so it can
+never overwrite corrections (`--force` overrides). Everything in the seed is
+reconstructed from conversation memory and carries `confidence: unverified` —
+fix entries in the store, not in the seed.
+
+`render` regenerates `PROJECT_ATLAS.md` (dashboard + summaries) from the store.
+That file is derived: never edit it. Run it from cron if you want a pasteable
+document for contexts without connectors.
+
 ## Layout
 
 ```
 atlas_mcp/store.py    file store: frontmatter, atomic writes, search, git
 atlas_mcp/server.py   MCP tools, resources, prompt, shared instructions
 atlas_mcp/app.py      ASGI app: /mcp/<token>/, /api, /openapi.json, /healthz
+atlas_mcp/seed.py     seed import + single-file render
+deploy/               apache vhost, systemd unit, ufw, fail2ban, backups
 data/projects/*.md    your notes — the actual product
+seed/                 bootstrap seed (one file, all projects)
 tests/                store unit tests + protocol-level e2e
 ```

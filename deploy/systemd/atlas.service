@@ -1,0 +1,48 @@
+# /etc/systemd/system/atlas.service
+[Unit]
+Description=Project Atlas MCP/REST server
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+User=atlas
+Group=atlas
+WorkingDirectory=/opt/atlas
+EnvironmentFile=/etc/atlas/atlas.env
+ExecStart=/opt/atlas/.venv/bin/python -m atlas_mcp.app
+Restart=on-failure
+RestartSec=5
+
+# --- sandbox -----------------------------------------------------------
+NoNewPrivileges=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectSystem=strict
+ProtectHome=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+RestrictAddressFamilies=AF_INET AF_UNIX
+LockPersonality=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @obsolete
+CapabilityBoundingSet=
+UMask=0077
+# the store is the only writable path; the code is not
+ReadWritePaths=/var/lib/atlas
+ReadOnlyPaths=/opt/atlas
+# outbound network is not needed by this service
+IPAddressDeny=any
+IPAddressAllow=localhost
+
+[Install]
+WantedBy=multi-user.target

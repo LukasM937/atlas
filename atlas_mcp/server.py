@@ -20,6 +20,7 @@ from .store import (
     ENTRY_KINDS,
     PRIORITY,
     SECTIONS,
+    SENSITIVITY,
     STATUS,
     AtlasError,
     AtlasStore,
@@ -32,7 +33,33 @@ from .store import (
 
 ATLAS_ROOT = os.environ.get("ATLAS_ROOT", "./data")
 ATLAS_GIT = os.environ.get("ATLAS_GIT", "0") == "1"
-store = AtlasStore(ATLAS_ROOT, git=ATLAS_GIT)
+# Clearance of THIS process. The internet-facing unit runs at "internal";
+# anything classified higher is invisible to it, not merely hidden.
+ATLAS_MAX_SENSITIVITY = os.environ.get("ATLAS_MAX_SENSITIVITY", "internal")
+store = AtlasStore(ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY)
+
+_audit_path = os.environ.get("ATLAS_AUDIT_LOG", "")
+
+
+def audit(tool: str, target: str = "", outcome: str = "ok") -> None:
+    """Append one metadata-only audit line. Never records note content."""
+    if not _audit_path:
+        return
+    from datetime import datetime, timezone
+
+    line = json.dumps(
+        {
+            "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+            "tool": tool,
+            "target": target,
+            "outcome": outcome,
+        }
+    )
+    try:
+        with open(_audit_path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
 
 INSTRUCTIONS = f"""
 Project Atlas is Lukas' single source of truth for projects, research and ideas,
@@ -48,6 +75,14 @@ Rules for every assistant using this connector:
 4. Record decisions as they happen: kind='decision' with the reason, not just
    the outcome.
 5. Statuses: {', '.join(STATUS)}. Priorities: {', '.join(PRIORITY)} (S = critical).
+6. Everything you read here leaves the owner's server and is processed by a
+   third-party model provider. Never write identifiers into the Atlas —
+   no addresses, account numbers, phone numbers, e-mail addresses, dates of
+   birth, health details, credentials, or personal data about third parties.
+   Reference the location of such material instead of copying it. Writes are
+   scanned and rejected if they contain identifiers.
+7. Classification is per project: {', '.join(SENSITIVITY)}. This instance serves
+   up to '{ATLAS_MAX_SENSITIVITY}'; higher records are not readable here at all.
 
 Sections available per project: {', '.join(SECTIONS)} plus an append-only Log.
 """.strip()
@@ -114,6 +149,7 @@ class GetInput(BaseModel):
 def atlas_get_project(params: GetInput) -> str:
     """Read one project: metadata, requested sections and the most recent log entries."""
     p = store.load(params.id)
+    audit("atlas_get_project", p.id)
     out = [f"# {p.name} (`{p.id}`)", "```yaml\n" + _yaml(p.meta) + "\n```"]
     wanted = params.sections or SECTIONS
     for s in wanted:
@@ -159,6 +195,11 @@ class UpsertInput(BaseModel):
     completion: Optional[int] = Field(default=None, ge=0, le=100, description="Percent done.")
     tags: Optional[list[str]] = Field(default=None, max_length=20)
     links: Optional[list[str]] = Field(default=None, max_length=20, description="URLs or repo paths.")
+    sensitivity: Optional[Literal["public", "internal", "confidential", "secret"]] = Field(
+        default=None,
+        description="Classification. Default 'internal'. Records above this "
+        "instance's clearance cannot be written or read here.",
+    )
     section: Optional[str] = Field(
         default=None, description=f"Section to rewrite. One of: {SECTIONS}."
     )
@@ -194,12 +235,14 @@ def atlas_upsert_project(params: UpsertInput) -> str:
                 "created": utcnow(),
                 "tags": params.tags or [],
                 "links": params.links or [],
+                "sensitivity": params.sensitivity or "internal",
             },
             body=new_project_body(),
         )
     else:
         p = store.load(pid)
-        for key in ("name", "status", "priority", "category", "completion", "tags", "links"):
+        for key in ("name", "status", "priority", "category", "completion", "tags",
+                    "links", "sensitivity"):
             val = getattr(params, key)
             if val is not None:
                 p.meta[key] = val
@@ -212,6 +255,7 @@ def atlas_upsert_project(params: UpsertInput) -> str:
         p.set_section(params.section, params.content)
 
     store.save(p, f"atlas: {'create' if created else 'update'} {pid}")
+    audit("atlas_upsert_project", pid, "created" if created else "updated")
     return f"{'Created' if created else 'Updated'} `{pid}`.\n" + p.summary_line()
 
 
@@ -246,6 +290,7 @@ def atlas_append_entry(params: AppendInput) -> str:
         p.body = p.body.rstrip() + "\n\n## Log\n"
     p.body = p.body.rstrip() + "\n" + entry
     store.save(p, f"atlas: {params.kind} on {p.id}")
+    audit("atlas_append_entry", p.id, params.kind)
     return f"Appended {params.kind} to `{p.id}`."
 
 

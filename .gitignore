@@ -6,3 +6,4 @@ venv/
 *.egg-info/
 data/
 PROJECT_ATLAS.md
+*.jsonl

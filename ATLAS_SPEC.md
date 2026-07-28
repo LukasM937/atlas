@@ -85,3 +85,42 @@ Prompt: `atlas_review` (quarterly review over the portfolio).
 - v2.3 — nightly render of `PROJECT_ATLAS.md` from the store, committed to git,
   so a single pasteable document still exists for contexts without connectors.
 - v2.4 — embeddings + `atlas_similar` once >200 projects.
+
+## Appendix: on the proposed repository layout
+
+The parallel proposal was a git repo with `projects/*.md` plus sibling
+directories `papers/ patents/ datasets/ architecture/ notes/ assets/` and
+hand-maintained `DASHBOARD.md`, `IDEAS.md`, `RESEARCH.md`, `STARTUPS.md`,
+`CHANGELOG.md`. Assessment:
+
+**Adopt: one file per project, in git.** Correct, and already how the store
+works. A single 300-page `project.md` cannot be partially loaded, cannot be
+diffed usefully, and forces every RAG query to pull the whole thing.
+
+**Reject: hand-maintained index files.** `DASHBOARD.md`, `IDEAS.md`,
+`STARTUPS.md` and `CHANGELOG.md` all restate facts that already live in the
+project files (status, priority, completion, potential). Two writable copies of
+the same fact diverge — usually within a week, and always silently. These are
+*views*, so they are generated: `python -m atlas_mcp.seed render`. The
+`Ideenfriedhof` is not a file either, it is `status: archived`. `CHANGELOG.md`
+is `git log`.
+
+**Restructure: the artefact directories.** `projects/` splits by project;
+`papers/ datasets/ notes/ assets/` split by artefact type. Mixing both axes
+means one project's material is scattered across six directories with nothing
+enforcing the link. Two better options:
+
+- Keep `projects/` flat and put pointers in frontmatter (`links:` to the git
+  repo, the Nextcloud folder, the dataset path). The Atlas indexes work; it
+  does not host it. Notes go in the project's Log, where they are dated and
+  attributed.
+- If a project genuinely needs local assets, promote it to a directory:
+  `projects/candlebot/index.md` + `figures/`. Same file, one level down.
+
+`papers/` is the one defensible exception, because a paper can belong to
+several projects — but then it needs its own ids and a `papers:` list in
+project frontmatter, otherwise it is just an unindexed folder. Deferred to
+v2.2 along with typed project links.
+
+**Net rule: exactly one writable location per fact.** Everything else is
+rendered.
