@@ -6,6 +6,8 @@ services:
       ATLAS_TOKEN: ${ATLAS_TOKEN:?set ATLAS_TOKEN in .env}
       ATLAS_ROOT: /data
       ATLAS_GIT: "1"
+      ATLAS_MAX_SENSITIVITY: ${ATLAS_MAX_SENSITIVITY:-internal}
+      ATLAS_AUDIT_LOG: ${ATLAS_AUDIT_LOG:-}
       # Phase 4 OAuth — all optional, all-or-nothing (see docs/ADR-001-auth.md).
       # Vars in .env aren't auto-injected into the container; each one used
       # by the app must be listed here explicitly or it's silently empty.
