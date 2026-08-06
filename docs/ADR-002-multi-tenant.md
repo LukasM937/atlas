@@ -64,6 +64,19 @@ the tenant registry. Possession of the link is the access control —
 invites are deliberately *not* pre-bound to a specific GitHub username,
 matching "here's a link, whoever gets there first with it is in."
 
+Originally implemented with its own `/invite/callback` redirect target,
+separate from the MCP/REST client flow's `/oauth/github/callback` — wrong,
+caught by live testing (GitHub's "the redirect_uri is not associated with
+this application" warning, shown before any app code runs). Classic
+GitHub OAuth Apps support exactly one registered callback URL, full stop;
+there is no way to register a second one for this. Fixed by reusing
+`/oauth/github/callback` for both flows, distinguishing an invite
+redemption from a normal client login via an `invite:` prefix on the
+`state` value (never collides with a real client's `github_state`, which
+is always an unprefixed `secrets.token_urlsafe(32)`). Regression guard:
+`tests/test_invite_route.py` pins the invite redirect's `redirect_uri` to
+exactly the registered callback URL.
+
 **Each tenant gets its own `AtlasStore`**, rooted at
 `tenants/<slugify(username)>/`, reusing `AtlasStore` completely unchanged
 — it already accepted an arbitrary `root`; nothing about the store itself

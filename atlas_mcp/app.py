@@ -5,9 +5,14 @@ Routes
                               (when ATLAS_PUBLIC_URL/ATLAS_GITHUB_* are set)
   /mcp/{ATLAS_TOKEN}/        streamable HTTP MCP endpoint, path-secret scheme
                               (fallback when OAuth env vars are unset)
-  /oauth/github/callback     GitHub login redirect target, only when OAuth is on
+  /oauth/github/callback     GitHub login redirect target, only when OAuth is on.
+                              Shared by both MCP/REST client login and invite
+                              redemption -- GitHub OAuth Apps only support one
+                              registered callback URL; a second one gets
+                              rejected by GitHub itself before we see the
+                              request. Which flow a given callback belongs to
+                              is carried in `state` (see invite_start).
   /invite/{token}            Redeem a single-use invite link, only when OAuth is on
-  /invite/callback           GitHub login redirect target for invite redemption
   /api/...                   REST facade                   -> ChatGPT Actions, curl, RAG
   /openapi.json              schema for the REST facade
   /healthz                   liveness
@@ -305,12 +310,23 @@ async def on_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"error": str(exc) or type(exc).__name__}, status_code=status)
 
 
-INVITE_CALLBACK_URL = f"{ATLAS_PUBLIC_URL}/invite/callback"
+# The one and only callback URL registered on the GitHub OAuth App (see
+# README's setup steps). Classic GitHub OAuth Apps support exactly one --
+# a redirect_uri that doesn't match it exactly gets rejected by GitHub
+# itself ("the redirect_uri is not associated with this application")
+# before any of our code runs. Invite redemption reuses this same URL
+# rather than registering a second one; which flow a callback belongs to
+# is carried in `state` instead (see invite_start / github_oauth_callback).
+GITHUB_CALLBACK_URL = f"{ATLAS_PUBLIC_URL}/oauth/github/callback"
+INVITE_STATE_PREFIX = "invite:"
 
 
 async def invite_start(request: Request):
     """Entry point for a shared invite link: validate (without consuming)
-    then hand off to GitHub login, carrying the invite token as state."""
+    then hand off to GitHub login. The invite token rides in `state`,
+    prefixed so the shared callback can tell this apart from a normal MCP/
+    REST client login (github_state values there are bare
+    secrets.token_urlsafe(32) -- never contain ':', so no collision risk)."""
     assert invite_registry is not None  # route only mounted when OAUTH_ENABLED
     token = request.path_params["token"]
     if not invite_registry.is_valid(token):
@@ -318,25 +334,21 @@ async def invite_start(request: Request):
     query = urlencode(
         {
             "client_id": GITHUB_CLIENT_ID,
-            "redirect_uri": INVITE_CALLBACK_URL,
+            "redirect_uri": GITHUB_CALLBACK_URL,
             "scope": "read:user",
-            "state": token,
+            "state": INVITE_STATE_PREFIX + token,
             "allow_signup": "false",
         }
     )
     return RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{query}", status_code=302)
 
 
-async def invite_callback(request: Request):
-    """GitHub redirects here after the invited user approves login. Redeems
-    the invite (single-use) and registers them as a new tenant."""
+async def _complete_invite(code: str, token: str) -> PlainTextResponse:
+    """Redeems the invite (single-use) and registers the GitHub login as a
+    new tenant."""
     assert invite_registry is not None and tenant_registry is not None
-    code = request.query_params.get("code")
-    token = request.query_params.get("state")
-    if not code or not token:
-        return PlainTextResponse("Missing code or state.", status_code=400)
     try:
-        username = await verify_github_code(code, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, INVITE_CALLBACK_URL)
+        username = await verify_github_code(code, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, GITHUB_CALLBACK_URL)
     except AuthorizeError as e:
         return PlainTextResponse(f"Login failed: {e.error_description or e.error}", status_code=403)
     if not invite_registry.redeem(token):
@@ -352,16 +364,19 @@ async def invite_callback(request: Request):
 
 
 async def github_oauth_callback(request: Request):
-    """GitHub redirects here after the user approves/denies login. Exchanges
-    the GitHub code, checks identity against the allow-listed user, and
-    redirects back to the MCP client's own redirect_uri with our code."""
+    """GitHub redirects here after the user approves/denies login -- the
+    single callback URL registered on the OAuth App, shared by the MCP/REST
+    client login flow and invite redemption (see GITHUB_CALLBACK_URL).
+    Routes on the `state` prefix to whichever flow it belongs to."""
     code = request.query_params.get("code")
-    github_state = request.query_params.get("state")
-    if not code or not github_state:
+    state = request.query_params.get("state")
+    if not code or not state:
         return PlainTextResponse("Missing code or state.", status_code=400)
+    if state.startswith(INVITE_STATE_PREFIX):
+        return await _complete_invite(code, state[len(INVITE_STATE_PREFIX):])
     assert oauth_provider is not None  # route only mounted when OAUTH_ENABLED
     try:
-        redirect_url = await oauth_provider.complete_github_login(code, github_state)
+        redirect_url = await oauth_provider.complete_github_login(code, state)
     except AuthorizeError as e:
         return PlainTextResponse(f"Login failed: {e.error_description or e.error}", status_code=403)
     return RedirectResponse(redirect_url, status_code=302)
@@ -394,9 +409,6 @@ if OAUTH_ENABLED:
     # advertised URLs actually agree with each other.
     routes.extend(mcp.streamable_http_app().routes)
     routes.append(Route("/oauth/github/callback", github_oauth_callback))
-    # /invite/callback must be registered before the /invite/{token} catch-all
-    # or Starlette would match "callback" itself as a token.
-    routes.append(Route("/invite/callback", invite_callback))
     routes.append(Route("/invite/{token}", invite_start))
 else:
     routes.append(Mount(f"/mcp/{TOKEN}", app=mcp.streamable_http_app()))
