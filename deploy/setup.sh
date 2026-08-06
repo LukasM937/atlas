@@ -82,7 +82,9 @@ if ! docker compose run --rm atlas python -c "import atlas_mcp.app" 2>&1; then
     exit 1
 fi
 echo "    Running the store test suite against the new image..."
-if ! docker compose run --rm atlas python tests/test_store.py; then
+# tests/ is deliberately not COPYed into the image (keeps the shipped image
+# to just the application code) -- bind-mount it in only for this check.
+if ! docker compose run --rm -v "$REPO_ROOT/tests:/app/tests:ro" atlas python tests/test_store.py; then
     echo "    New image failed its own test suite -- not touching the running container." >&2
     echo "    (The old container, if any, is still up and unaffected.)" >&2
     exit 1
