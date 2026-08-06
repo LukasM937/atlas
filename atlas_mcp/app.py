@@ -145,6 +145,12 @@ async def api_append(request: Request) -> JSONResponse:
     return JSONResponse({"ok": True, "id": p.id})
 
 
+async def api_delete(request: Request) -> JSONResponse:
+    _auth(request)
+    pid = store.delete(request.path_params["project_id"])
+    return JSONResponse({"ok": True, "id": pid})
+
+
 # Same fields the MCP UpsertInput model accepts — keeps the REST facade from
 # writing arbitrary caller-supplied keys into stored frontmatter unchecked.
 ALLOWED_META_FIELDS = (
@@ -278,6 +284,7 @@ routes = [
     Route("/api/projects", api_upsert, methods=["POST"]),
     Route("/api/search", api_search, methods=["GET"]),
     Route("/api/projects/{project_id}", api_get, methods=["GET"]),
+    Route("/api/projects/{project_id}", api_delete, methods=["DELETE"]),
     Route("/api/projects/{project_id}/entries", api_append, methods=["POST"]),
 ]
 

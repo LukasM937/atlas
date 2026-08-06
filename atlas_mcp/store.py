@@ -209,6 +209,17 @@ class AtlasStore:
             self._commit(path, message or f"atlas: update {project.id}")
         return path
 
+    def delete(self, project_id: str) -> str:
+        # load() enforces existence and the clearance gate, so a project you
+        # cannot see cannot be deleted through this path either.
+        project = self.load(project_id)
+        path = self._path(project_id)
+        path.unlink(missing_ok=True)
+        if self.git:
+            # `git add` on a removed path stages the deletion; git keeps history.
+            self._commit(path, f"atlas: delete {project.id}")
+        return project.id
+
     def all(self) -> list[Project]:
         out = []
         for p in sorted(self.projects_dir.glob("*.md")):
