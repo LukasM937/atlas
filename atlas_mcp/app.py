@@ -47,7 +47,6 @@ from .server import (
     ATLAS_MAX_SENSITIVITY,
     ATLAS_PUBLIC_URL,
     ATLAS_ROOT,
-    GITHUB_ALLOWED_USER,
     GITHUB_CLIENT_ID,
     GITHUB_CLIENT_SECRET,
     OAUTH_ENABLED,
@@ -123,37 +122,31 @@ class RateLimitMiddleware:
 async def _resolve_store(request: Request) -> AtlasStore:
     """Authenticate a REST request and return the caller's store.
 
-    Two credentials are accepted, an OR (see docs/ADR-002 "Unifying REST"):
-
-      * A valid OAuth access token issued by our GitHubOAuthProvider — the
-        same tokens MCP uses. Resolved to that GitHub identity's tenant
-        store via ``AccessToken.subject``, exactly like ``get_current_store``.
-      * The static ``ATLAS_TOKEN`` — **DEPRECATED**, owner-only. Retained so
-        curl/scripts/local tooling (and the iOS app's legacy token path)
-        keep working; in multi-tenant (OAuth) mode it resolves to the
-        owner's own tenant store rather than the now-empty legacy root.
-        Prefer logging in with GitHub.
+    In OAuth mode, GitHub login is the only accepted credential — the
+    static ATLAS_TOKEN's REST role was deprecated (see docs/ADR-002
+    "Unifying REST") and is now retired now that GitHub login is confirmed
+    working end to end for both MCP and REST. ATLAS_TOKEN still exists as
+    an env var (docker-compose.yml requires it) and still works as the
+    sole credential in genuine single-tenant fallback mode (OAuth entirely
+    disabled) — that's a different, still-supported deployment mode, not
+    the deprecated path this removed.
     """
     header = request.headers.get("authorization", "")
     token = header[7:].strip() if header[:7].lower() == "bearer " else ""
     if not token:
         raise PermissionError("Missing or wrong Bearer token.")
 
-    # OAuth access token -> the authenticated tenant's store.
     if OAUTH_ENABLED and oauth_provider is not None:
         access = await oauth_provider.load_access_token(token)
         if access is not None and access.subject:
             return get_store_for(
                 access.subject, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY
             )
+        raise PermissionError("Missing or wrong Bearer token.")
 
-    # Legacy static owner token (deprecated).
+    # Genuine single-tenant fallback mode: OAuth isn't configured at all.
     if secrets.compare_digest(token, TOKEN):
-        if not OAUTH_ENABLED:
-            return store  # genuine single-tenant fallback mode, nothing to resolve
-        return get_store_for(
-            GITHUB_ALLOWED_USER, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY
-        )
+        return store
 
     raise PermissionError("Missing or wrong Bearer token.")
 

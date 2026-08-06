@@ -1,5 +1,7 @@
-"""REST auth in multi-tenant (OAuth) mode: both accepted credentials must
-resolve to the right tenant, and never to anyone else's.
+"""REST auth in multi-tenant (OAuth) mode: an OAuth access token must
+resolve to the right tenant and never anyone else's, and the deprecated
+static token must no longer work at all now that OAuth is live (retired
+after being confirmed working end to end -- see docs/ADR-002).
 
 Sets OAuth env vars before importing atlas_mcp.app, so run this as its own
 process (python tests/test_rest_auth.py), not imported alongside other
@@ -32,13 +34,11 @@ def _seed(username: str, project_id: str) -> None:
     s.save(Project(id=project_id, meta={"name": project_id}, body=new_project_body("test fixture")))
 
 
-def test_static_token_resolves_owner_tenant():
+def test_static_token_rejected_in_oauth_mode():
     _seed("owner", "owner-project")
     resp = client.get("/api/projects", headers={"Authorization": "Bearer test-static-token"})
-    assert resp.status_code == 200, resp.text
-    ids = [p["id"] for p in resp.json()]
-    assert "owner-project" in ids, ids
-    print("static token -> owner tenant: OK")
+    assert resp.status_code == 401, resp.text
+    print("static token rejected once OAuth is live: OK")
 
 
 def test_oauth_token_resolves_own_tenant_and_is_isolated():
@@ -68,6 +68,6 @@ def test_bad_token_rejected():
 
 
 with client:
-    test_static_token_resolves_owner_tenant()
+    test_static_token_rejected_in_oauth_mode()
     test_oauth_token_resolves_own_tenant_and_is_isolated()
     test_bad_token_rejected()

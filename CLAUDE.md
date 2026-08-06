@@ -13,7 +13,8 @@ ATLAS_BASE=http://127.0.0.1:8787 python tests/test_e2e.py   # protocol round tri
 python -m atlas_mcp.seed import seed/PROJECT_ATLAS.seed.md  # bootstrap (idempotent)
 python -m atlas_mcp.seed render PROJECT_ATLAS.md            # derived view
 python tests/test_tenants.py                  # multi-tenant registry/isolation tests
-python tests/test_rest_auth.py                # REST auth: static token + OAuth token, both tenant-resolved
+python tests/test_rest_auth.py                # REST auth (OAuth mode): OAuth token resolves+isolates, static token rejected
+python tests/test_rest_auth_fallback.py       # REST auth (no OAuth): static token still the sole credential
 python -m atlas_mcp.invite                    # mint a single-use invite link (OAuth mode)
 ```
 

@@ -122,16 +122,16 @@ What changed, in `app.py`:
     did for MCP) to `AccessToken.subject`, then to that identity's tenant
     store via `get_store_for()` — the same resolution `get_current_store()`
     uses for MCP tool calls.
-  - The static `ATLAS_TOKEN` — kept, **not retired**, but now explicitly
-    documented as deprecated. In OAuth mode it resolves to the *owner's*
-    own tenant (`GITHUB_ALLOWED_USER`) rather than the old single global
-    `store`, which the tenant migration left empty. Without this
+  - The static `ATLAS_TOKEN` — at this point kept as a deprecated fallback,
+    not retired yet (superseded below). In OAuth mode it resolved to the
+    *owner's* own tenant (`GITHUB_ALLOWED_USER`) rather than the old single
+    global `store`, which the tenant migration left empty. Without that
     remapping, every existing static-token caller (curl, scripts, and the
     iOS app's pre-OAuth token path) would have silently started seeing
-    nothing after the migration in ADR-002 — this is what actually
-    surfaced the gap: the iOS app authenticated fine post-migration but
-    the projects list came back empty, tracing straight back to `_auth()`
-    still reading the pre-migration root `store`.
+    nothing after the migration — this is what actually surfaced the gap:
+    the iOS app authenticated fine post-migration but the projects list
+    came back empty, tracing straight back to `_auth()` still reading the
+    pre-migration root `store`.
   - Timing-safe comparison (`secrets.compare_digest`) kept for the static
     token check; OAuth tokens are opaque random strings looked up by exact
     match in the provider's own token table, same as MCP.
@@ -139,16 +139,40 @@ What changed, in `app.py`:
   `api_delete`, `api_upsert`) now call `await _resolve_store(request)` and
   operate on the returned per-request store instead of the module-level
   `store` global.
-- Regression coverage: `tests/test_rest_auth.py` — static token resolves
-  to the owner's tenant, an OAuth token resolves to its own subject's
-  tenant, and (the one that matters) one identity's REST session never
-  sees another's projects. Exercises the real Starlette app via
-  `TestClient`, not a mock.
 
 The client side (Atlas Notes, the iOS app) added full OAuth 2.1 + PKCE +
 `ASWebAuthenticationSession` "Log in with GitHub" as the primary Setup
-option, with the static token demoted to an "Advanced, deprecated"
-fallback — see that project's own `CLAUDE.md`.
+option, with the static token initially kept as an "Advanced, deprecated"
+fallback in the Setup screen.
+
+### Static REST token retired (also 2026-08-06, once GitHub login was confirmed working)
+
+Deprecating something that still works quietly becomes permanent if
+nothing ever forces the question. Here the trigger was concrete and fast:
+GitHub login was verified working end to end (real device, real server)
+within the same day, at which point there was no remaining reason to keep
+a second, weaker credential alive. `_resolve_store()` now branches once on
+`OAUTH_ENABLED`, not per-request per-credential:
+
+- **OAuth mode**: only a valid OAuth access token is accepted. The static
+  `ATLAS_TOKEN` branch is gone from this path entirely — a request bearing
+  it gets the same 401 as any other invalid token, not a resolved store.
+- **Fallback mode** (`OAUTH_ENABLED` false — OAuth not configured at all,
+  a genuinely different deployment shape): unchanged, static `ATLAS_TOKEN`
+  is still the sole credential, still resolves to the single global
+  `store`. This was never the deprecated path and isn't affected.
+
+`ATLAS_TOKEN` the *environment variable* is untouched — `docker-compose.yml`
+still requires it unconditionally, and it's still what fallback mode runs
+on. What changed is narrower: once OAuth is live, that value simply stops
+being an accepted REST credential.
+
+Regression coverage, one file per mode (each decides `OAUTH_ENABLED` from
+env vars at import time, so they can't share a process):
+`tests/test_rest_auth.py` — an OAuth token resolves to its own subject's
+tenant and never anyone else's, and the static token is now explicitly
+rejected in OAuth mode. `tests/test_rest_auth_fallback.py` — the static
+token still authenticates, unaffected, with OAuth unconfigured.
 
 ## Consequences
 

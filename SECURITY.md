@@ -136,9 +136,13 @@ with physical/backup access — can still read every tenant's files directly,
 same as before this feature existed. Onboarding a new tenant is via a
 single-use, time-limited invite link (`python -m atlas_mcp.invite`), not a
 self-serve signup — the registry never grows without the admin explicitly
-minting a link. REST additionally accepts the static `ATLAS_TOKEN` as a
-deprecated owner-only credential (resolves to the admin's own tenant, not
-a separate un-isolated global store) — see ADR-002's "Unifying REST onto
+minting a link. In OAuth mode, REST accepts **only** a GitHub OAuth access
+token — the static `ATLAS_TOKEN` was briefly a deprecated fallback
+credential here and has since been retired from this path entirely, once
+GitHub login was confirmed working end to end. `ATLAS_TOKEN` remains the
+sole credential in fallback mode (OAuth not configured at all) — a
+different, still-supported, genuinely single-tenant deployment shape, not
+the deprecated path that was removed. See ADR-002's "Unifying REST onto
 OAuth" section.
 
 ## What is deliberately *not* claimed

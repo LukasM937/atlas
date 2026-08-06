@@ -211,17 +211,17 @@ this as an emergency/offline fallback, not the default.
 
 ### REST, for scripts, a Custom GPT's Actions, or the iOS app
 
-`/api/*` accepts either credential — an OR, not a choice you make once per
-deployment:
+**In OAuth mode**, `/api/*` accepts only a GitHub OAuth access token — the
+same kind MCP clients get, resolved to whichever tenant that identity
+belongs to. This is what the iOS app uses via "Log in with GitHub" in
+Setup; each tenant's phone sees only their own store, same isolation MCP
+has. The static `ATLAS_TOKEN` does **not** work here anymore — it was a
+deprecated fallback during the OAuth rollout and has since been retired
+from this path (see `docs/ADR-002-multi-tenant.md`).
 
-- **The static `ATLAS_TOKEN`** — simplest, and still the only option that
-  makes sense for curl/scripts/Custom GPT Actions. In OAuth mode it
-  resolves to the *admin's own* tenant (whoever `ATLAS_GITHUB_ALLOWED_USER`
-  is), same data a GitHub login as that account would see.
-- **A GitHub OAuth access token** — the same kind MCP clients get, resolved
-  to whichever tenant that identity belongs to. This is what the iOS app
-  uses once you "Log in with GitHub" there instead of pasting a token —
-  each tenant's phone sees only their own store, same isolation MCP has.
+**Without OAuth configured at all** (the genuinely single-tenant fallback
+deployment — see "Fallback: skip OAuth" above), `/api/*` still uses the
+static `ATLAS_TOKEN` as its only credential, unchanged:
 
 Custom GPT → Actions → import `https://your.domain.example/openapi.json`,
 auth type Bearer, paste `ATLAS_TOKEN`. Or just `curl -H "Authorization:
