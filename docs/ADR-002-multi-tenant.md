@@ -2,8 +2,10 @@
 
 ## Status
 
-Accepted, implemented for MCP. REST intentionally left single-tenant — see
-"Unifying REST onto OAuth" below.
+Accepted, implemented for both MCP and REST (REST landed 2026-08-06,
+triggered exactly as anticipated below — the iOS app's Setup screen
+gaining "Log in with GitHub"). See "Unifying REST onto OAuth" for what
+that changed and why it was safe to build once that trigger fired.
 
 ## Context
 
@@ -102,36 +104,51 @@ Docker-bind-mount ownership artifact, not a real multi-user OS boundary
 inside the container, so widening it doesn't weaken anything that was
 actually protecting tenant data from each other.
 
-## Unifying REST onto OAuth (roadmap, not built)
+## Unifying REST onto OAuth (built 2026-08-06)
 
-`/api/*` still authenticates with the single static `ATLAS_TOKEN` and
-still serves the one legacy global `store` — deliberately, not by
-oversight. Nothing today needs REST to be multi-tenant: the invited
-family member is a Claude/ChatGPT (MCP) user, and the iOS app that would
-be the actual REST client doesn't exist yet (it currently talks to the
-owner's own instance with the static token — see the client app's own
-`CLAUDE.md`). Building REST multi-tenancy now would roughly double the
-size and risk of this change for no user waiting on it.
+Originally deferred: nothing needed REST to be multi-tenant while the
+invited family member was MCP-only and the iOS app didn't exist yet.
+Built once its actual trigger fired — the iOS app's Setup screen gaining
+"Log in with GitHub" — exactly as this ADR anticipated, not on a
+schedule.
 
-What changes when this is picked up:
+What changed, in `app.py`:
 
-- `_auth()` in `app.py` needs to accept a valid OAuth access token in
-  addition to the static bearer token — resolved via
-  `oauth_provider.load_access_token()`, the same `ProviderTokenVerifier`
-  already used for MCP. `AccessToken.subject` gives the same per-request
-  identity `get_current_store()` already uses for MCP.
-- REST handlers (`api_list`, `api_get`, etc.) switch from the module-level
-  `store` to the same `get_current_store()`-style resolution MCP tools
-  use — mechanical once `_auth()` can hand back an identity instead of
-  just pass/fail.
-- The static `ATLAS_TOKEN` is **not retired** when this happens. It stays
-  as the owner's own credential (useful for curl/scripts/local tooling
-  that doesn't want to do an OAuth dance) — the change is additive, an
-  OR, not a replacement.
+- `_auth()` (sync, pass/fail, always the single global `store`) was
+  replaced by `async def _resolve_store(request) -> AtlasStore`. Accepts
+  either credential, an OR:
+  - A valid OAuth access token — resolved via `oauth_provider
+    .load_access_token()` (the exact check `ProviderTokenVerifier` already
+    did for MCP) to `AccessToken.subject`, then to that identity's tenant
+    store via `get_store_for()` — the same resolution `get_current_store()`
+    uses for MCP tool calls.
+  - The static `ATLAS_TOKEN` — kept, **not retired**, but now explicitly
+    documented as deprecated. In OAuth mode it resolves to the *owner's*
+    own tenant (`GITHUB_ALLOWED_USER`) rather than the old single global
+    `store`, which the tenant migration left empty. Without this
+    remapping, every existing static-token caller (curl, scripts, and the
+    iOS app's pre-OAuth token path) would have silently started seeing
+    nothing after the migration in ADR-002 — this is what actually
+    surfaced the gap: the iOS app authenticated fine post-migration but
+    the projects list came back empty, tracing straight back to `_auth()`
+    still reading the pre-migration root `store`.
+  - Timing-safe comparison (`secrets.compare_digest`) kept for the static
+    token check; OAuth tokens are opaque random strings looked up by exact
+    match in the provider's own token table, same as MCP.
+- All six REST handlers (`api_list`, `api_get`, `api_search`, `api_append`,
+  `api_delete`, `api_upsert`) now call `await _resolve_store(request)` and
+  operate on the returned per-request store instead of the module-level
+  `store` global.
+- Regression coverage: `tests/test_rest_auth.py` — static token resolves
+  to the owner's tenant, an OAuth token resolves to its own subject's
+  tenant, and (the one that matters) one identity's REST session never
+  sees another's projects. Exercises the real Starlette app via
+  `TestClient`, not a mock.
 
-What triggers doing it: the iOS app's Setup screen gaining "Log in with
-GitHub" as a connection option, which is the concrete moment REST actually
-needs more than one identity. Not a date — a feature.
+The client side (Atlas Notes, the iOS app) added full OAuth 2.1 + PKCE +
+`ASWebAuthenticationSession` "Log in with GitHub" as the primary Setup
+option, with the static token demoted to an "Advanced, deprecated"
+fallback — see that project's own `CLAUDE.md`.
 
 ## Consequences
 

@@ -209,10 +209,19 @@ Claude's and ChatGPT's connector UIs try to negotiate OAuth regardless of
 what you paste in, and error out instead of falling back gracefully. Treat
 this as an emergency/offline fallback, not the default.
 
-### REST, for scripts or a Custom GPT's Actions
+### REST, for scripts, a Custom GPT's Actions, or the iOS app
 
-`/api/*` always uses a plain Bearer token (the same `ATLAS_TOKEN`),
-independent of whichever MCP scheme above is active:
+`/api/*` accepts either credential — an OR, not a choice you make once per
+deployment:
+
+- **The static `ATLAS_TOKEN`** — simplest, and still the only option that
+  makes sense for curl/scripts/Custom GPT Actions. In OAuth mode it
+  resolves to the *admin's own* tenant (whoever `ATLAS_GITHUB_ALLOWED_USER`
+  is), same data a GitHub login as that account would see.
+- **A GitHub OAuth access token** — the same kind MCP clients get, resolved
+  to whichever tenant that identity belongs to. This is what the iOS app
+  uses once you "Log in with GitHub" there instead of pasting a token —
+  each tenant's phone sees only their own store, same isolation MCP has.
 
 Custom GPT → Actions → import `https://your.domain.example/openapi.json`,
 auth type Bearer, paste `ATLAS_TOKEN`. Or just `curl -H "Authorization:

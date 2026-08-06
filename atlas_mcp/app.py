@@ -47,6 +47,7 @@ from .server import (
     ATLAS_MAX_SENSITIVITY,
     ATLAS_PUBLIC_URL,
     ATLAS_ROOT,
+    GITHUB_ALLOWED_USER,
     GITHUB_CLIENT_ID,
     GITHUB_CLIENT_SECRET,
     OAUTH_ENABLED,
@@ -56,7 +57,7 @@ from .server import (
     store,
     tenant_registry,
 )
-from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
+from .store import AtlasError, AtlasStore, Project, make_entry, new_project_body, slugify, utcnow
 from .tenants import get_store_for
 
 TOKEN = os.environ.get("ATLAS_TOKEN") or secrets.token_urlsafe(24)
@@ -119,10 +120,42 @@ class RateLimitMiddleware:
         await self.app(scope, receive, send)
 
 
-def _auth(request: Request) -> None:
+async def _resolve_store(request: Request) -> AtlasStore:
+    """Authenticate a REST request and return the caller's store.
+
+    Two credentials are accepted, an OR (see docs/ADR-002 "Unifying REST"):
+
+      * A valid OAuth access token issued by our GitHubOAuthProvider — the
+        same tokens MCP uses. Resolved to that GitHub identity's tenant
+        store via ``AccessToken.subject``, exactly like ``get_current_store``.
+      * The static ``ATLAS_TOKEN`` — **DEPRECATED**, owner-only. Retained so
+        curl/scripts/local tooling (and the iOS app's legacy token path)
+        keep working; in multi-tenant (OAuth) mode it resolves to the
+        owner's own tenant store rather than the now-empty legacy root.
+        Prefer logging in with GitHub.
+    """
     header = request.headers.get("authorization", "")
-    if header != f"Bearer {TOKEN}":
+    token = header[7:].strip() if header[:7].lower() == "bearer " else ""
+    if not token:
         raise PermissionError("Missing or wrong Bearer token.")
+
+    # OAuth access token -> the authenticated tenant's store.
+    if OAUTH_ENABLED and oauth_provider is not None:
+        access = await oauth_provider.load_access_token(token)
+        if access is not None and access.subject:
+            return get_store_for(
+                access.subject, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY
+            )
+
+    # Legacy static owner token (deprecated).
+    if secrets.compare_digest(token, TOKEN):
+        if not OAUTH_ENABLED:
+            return store  # genuine single-tenant fallback mode, nothing to resolve
+        return get_store_for(
+            GITHUB_ALLOWED_USER, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY
+        )
+
+    raise PermissionError("Missing or wrong Bearer token.")
 
 
 async def healthz(request: Request) -> PlainTextResponse:
@@ -130,42 +163,42 @@ async def healthz(request: Request) -> PlainTextResponse:
 
 
 async def api_list(request: Request) -> JSONResponse:
-    _auth(request)
+    s = await _resolve_store(request)
     q = request.query_params
-    ps = store.filter(q.get("status"), q.get("priority"), q.get("category"), q.get("tag"))
+    ps = s.filter(q.get("status"), q.get("priority"), q.get("category"), q.get("tag"))
     return JSONResponse([{"id": p.id, **p.meta} for p in ps])
 
 
 async def api_get(request: Request) -> JSONResponse:
-    _auth(request)
-    p = store.load(request.path_params["project_id"])
+    s = await _resolve_store(request)
+    p = s.load(request.path_params["project_id"])
     return JSONResponse({"id": p.id, "meta": p.meta, "body": p.body})
 
 
 async def api_search(request: Request) -> JSONResponse:
-    _auth(request)
-    hits = store.search(request.query_params.get("q", ""), int(request.query_params.get("limit", 8)))
+    s = await _resolve_store(request)
+    hits = s.search(request.query_params.get("q", ""), int(request.query_params.get("limit", 8)))
     return JSONResponse(
-        [{"id": p.id, "name": p.name, "score": s, "snippet": snip} for p, snip, s in hits]
+        [{"id": p.id, "name": p.name, "score": score, "snippet": snip} for p, snip, score in hits]
     )
 
 
 async def api_append(request: Request) -> JSONResponse:
-    _auth(request)
+    s = await _resolve_store(request)
     body = await request.json()
-    p = store.load(request.path_params["project_id"])
+    p = s.load(request.path_params["project_id"])
     if "## Log" not in p.body:
         p.body = p.body.rstrip() + "\n\n## Log\n"
     p.body = p.body.rstrip() + "\n" + make_entry(
         body.get("kind", "note"), body["text"], body.get("author", "api")
     )
-    store.save(p)
+    s.save(p)
     return JSONResponse({"ok": True, "id": p.id})
 
 
 async def api_delete(request: Request) -> JSONResponse:
-    _auth(request)
-    pid = store.delete(request.path_params["project_id"])
+    s = await _resolve_store(request)
+    pid = s.delete(request.path_params["project_id"])
     return JSONResponse({"ok": True, "id": pid})
 
 
@@ -177,11 +210,11 @@ ALLOWED_META_FIELDS = (
 
 
 async def api_upsert(request: Request) -> JSONResponse:
-    _auth(request)
+    s = await _resolve_store(request)
     body = await request.json()
     pid = slugify(body["id"])
-    if store.exists(pid):
-        p = store.load(pid)
+    if s.exists(pid):
+        p = s.load(pid)
         p.meta.update({k: v for k, v in body.items() if k in ALLOWED_META_FIELDS})
     else:
         p = Project(
@@ -201,7 +234,7 @@ async def api_upsert(request: Request) -> JSONResponse:
         )
     if body.get("section") and body.get("content"):
         p.set_section(body["section"], body["content"])
-    store.save(p)
+    s.save(p)
     return JSONResponse({"ok": True, "id": p.id, "meta": p.meta})
 
 

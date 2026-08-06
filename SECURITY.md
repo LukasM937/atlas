@@ -124,19 +124,22 @@ the Anthropic IP allowlist on `/mcp/` comes off (it would otherwise block
 the OAuth login step itself, which is a browser redirect from the user's own
 IP, not Anthropic's range) and the path-secret scheme is retired.
 
-**Multi-tenant isolation (MCP only, see `docs/ADR-002-multi-tenant.md`):**
+**Multi-tenant isolation (MCP and REST, see `docs/ADR-002-multi-tenant.md`):**
 each accepted GitHub identity gets its own `AtlasStore` under
 `tenants/<slug>/`, resolved per-request from the authenticated identity, not
 from anything the client supplies. This is an *application-level* boundary,
-enforced by `get_current_store()` always resolving from the verified OAuth
-subject. It is not an OS-level permission boundary: whoever can read the
-disk — the admin, root, anyone with physical/backup access — can still read
-every tenant's files directly, same as before this feature existed. Onboarding
-a new tenant is via a single-use, time-limited invite link
-(`python -m atlas_mcp.invite`), not a self-serve signup — the registry never
-grows without the admin explicitly minting a link. The REST facade (`/api/*`)
-is *not* multi-tenant — it still serves a single owner via the static
-`ATLAS_TOKEN`; see ADR-002's roadmap section for why and when that changes.
+enforced by `get_current_store()` (MCP) / `_resolve_store()` (REST) always
+resolving from the verified identity — an OAuth access token's
+`AccessToken.subject`, never a client-supplied field. It is not an OS-level
+permission boundary: whoever can read the disk — the admin, root, anyone
+with physical/backup access — can still read every tenant's files directly,
+same as before this feature existed. Onboarding a new tenant is via a
+single-use, time-limited invite link (`python -m atlas_mcp.invite`), not a
+self-serve signup — the registry never grows without the admin explicitly
+minting a link. REST additionally accepts the static `ATLAS_TOKEN` as a
+deprecated owner-only credential (resolves to the admin's own tenant, not
+a separate un-isolated global store) — see ADR-002's "Unifying REST onto
+OAuth" section.
 
 ## What is deliberately *not* claimed
 
@@ -146,7 +149,7 @@ is *not* multi-tenant — it still serves a single owner via the static
   worse than not having it.
 - No protection against a compromised Claude or ChatGPT account.
 - No per-record access control beyond the four sensitivity levels. Multi-
-  tenant isolation (MCP only) is per-*tenant*, not per-record — see above.
+  tenant isolation is per-*tenant*, not per-record — see above.
 
 ## If you think the store leaked
 
