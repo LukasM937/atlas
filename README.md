@@ -54,6 +54,12 @@ If you already run nginx and would rather not add Apache, porting
 `deploy/apache/atlas.conf.template` (`ProxyPass`/`<Location>` → `proxy_pass`/
 `location`) is straightforward;
 
+**TLS/httpS**:
+For TLS this Repo uses [Certbot](https://certbot.eff.org) a tool
+build by EEF to handle the certificates, they remind you when your certificates expire
+also they set up the ssl part of the apache2 config, which is neat.
+The exact calls are hidden by the setup script but there are some necessary interactions.
+
 ---
 
 ## Quick start: local dev (no server yet)
