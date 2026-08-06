@@ -112,10 +112,10 @@ the live host — not currently a real control there, only a planned one.
 Data: store mode 0700; encrypted off-box backups with a tested restore; git
 history in the store repo as the tamper-evident record.
 
-Auth: Phase 4 implemented, rolling out. GitHub-backed OAuth (identity check
-only — one allow-listed username, no authorization scope beyond that) is
-available on a fixed `/mcp` path when `ATLAS_PUBLIC_URL`/`ATLAS_GITHUB_*` are
-set; see `docs/ADR-001-auth.md`. The original secret-path scheme
+Auth: Phase 4 implemented, rolling out. GitHub-backed OAuth (identity check —
+username must be in the tenant registry, no authorization scope beyond that)
+is available on a fixed `/mcp` path when `ATLAS_PUBLIC_URL`/`ATLAS_GITHUB_*`
+are set; see `docs/ADR-001-auth.md`. The original secret-path scheme
 (`/mcp/<token>/`) remains the default until OAuth is confirmed working from
 a real client, since it turned out to be required for basic connectivity,
 not just an optional hardening step — both Claude and ChatGPT's connector
@@ -124,6 +124,20 @@ the Anthropic IP allowlist on `/mcp/` comes off (it would otherwise block
 the OAuth login step itself, which is a browser redirect from the user's own
 IP, not Anthropic's range) and the path-secret scheme is retired.
 
+**Multi-tenant isolation (MCP only, see `docs/ADR-002-multi-tenant.md`):**
+each accepted GitHub identity gets its own `AtlasStore` under
+`tenants/<slug>/`, resolved per-request from the authenticated identity, not
+from anything the client supplies. This is an *application-level* boundary,
+enforced by `get_current_store()` always resolving from the verified OAuth
+subject. It is not an OS-level permission boundary: whoever can read the
+disk — the admin, root, anyone with physical/backup access — can still read
+every tenant's files directly, same as before this feature existed. Onboarding
+a new tenant is via a single-use, time-limited invite link
+(`python -m atlas_mcp.invite`), not a self-serve signup — the registry never
+grows without the admin explicitly minting a link. The REST facade (`/api/*`)
+is *not* multi-tenant — it still serves a single owner via the static
+`ATLAS_TOKEN`; see ADR-002's roadmap section for why and when that changes.
+
 ## What is deliberately *not* claimed
 
 - No at-rest encryption unless Phase 2.2 concludes it is actually feasible on
@@ -131,14 +145,16 @@ IP, not Anthropic's range) and the path-secret scheme is retired.
   running server, and writing it into a policy without implementing it is
   worse than not having it.
 - No protection against a compromised Claude or ChatGPT account.
-- No multi-user model, no per-record access control beyond the four levels.
+- No per-record access control beyond the four sensitivity levels. Multi-
+  tenant isolation (MCP only) is per-*tenant*, not per-record — see above.
 
 ## If you think the store leaked
 
 1. Disconnect the connector in Claude and revoke it at the provider.
 2. Rotate `ATLAS_TOKEN` (or the OAuth client), reload Apache, re-add.
-3. `git log` in the store repo — every write is a commit, so the diff is the
-   exposure.
+3. `git log` in the affected tenant's store repo (`tenants/<slug>/.git` in
+   multi-tenant mode, the store root itself otherwise) — every write is a
+   commit, so the diff is the exposure.
 4. Read the audit log for the window.
 5. Decide, per record, whether the classification was wrong; fix the
    classification before restoring service.

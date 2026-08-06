@@ -180,6 +180,23 @@ In **ChatGPT**: Settings → Connectors → *Add connector* → same URL,
 
 Test in either: *"Use the Atlas: give me an overview of my projects."*
 
+### Inviting someone else (multi-tenant)
+
+Once OAuth is set up, the server can host more than one person — each
+accepted GitHub identity gets their own isolated store, invisible to
+everyone else's. See `docs/ADR-002-multi-tenant.md` for the design; in
+practice:
+
+```bash
+python -m atlas_mcp.invite
+```
+
+prints a one-time link (`https://your.domain.example/invite/<token>`),
+valid for 7 days and usable exactly once. Send it directly to the person —
+whoever visits it and logs in with GitHub is registered as a new tenant.
+There's no self-serve signup and no admin screen yet: minting a link is the
+only way in, and you decide who gets one.
+
 ### Fallback: skip OAuth, use a path secret instead
 
 Leave the four `ATLAS_GITHUB_*`/`ATLAS_PUBLIC_URL` variables unset and the
@@ -218,7 +235,7 @@ All read from `.env` next to `docker-compose.yml` (Docker deployment) or
 | `ATLAS_PUBLIC_URL` | only for OAuth | Your server's public HTTPS origin, e.g. `https://your.domain.example`. |
 | `ATLAS_GITHUB_CLIENT_ID` | only for OAuth | From the GitHub OAuth App. |
 | `ATLAS_GITHUB_CLIENT_SECRET` | only for OAuth | From the GitHub OAuth App. Keep this out of git — it already is, `.env` is gitignored. |
-| `ATLAS_GITHUB_ALLOWED_USER` | only for OAuth | The one GitHub username allowed to authenticate. |
+| `ATLAS_GITHUB_ALLOWED_USER` | only for OAuth | Bootstrapped as the first tenant on first boot. Additional people are added via invite links, not this variable — see "Inviting someone else" above. |
 
 The four OAuth variables are all-or-nothing: set all four to enable it, leave
 all four unset for the fallback scheme. See `deploy/atlas.env.example` for a
@@ -235,8 +252,12 @@ process runs at `internal` clearance and anything above it is invisible to
 it — excluded inside the store, not just filtered from the response. Writes
 containing identifiers (IBAN, card, e-mail, phone, tax id, keys, tokens,
 JWT, DOB) are rejected outright. An optional metadata-only audit log records
-tool, project and outcome, never content. Full threat model and policy in
-`SECURITY.md`; the OAuth design specifically in `docs/ADR-001-auth.md`.
+tool, project and outcome, never content. In OAuth mode, each accepted
+GitHub identity gets its own isolated store — application-level tenant
+isolation, not an OS permission boundary (root/the admin can still read
+every tenant's files on disk). Full threat model and policy in
+`SECURITY.md`; OAuth design in `docs/ADR-001-auth.md`, multi-tenant design
+in `docs/ADR-002-multi-tenant.md`.
 
 ---
 
@@ -260,14 +281,17 @@ summaries) from the live store; that file is derived — never hand-edit it.
 ```
 atlas_mcp/store.py       file store: frontmatter, atomic writes, search, git
 atlas_mcp/server.py      MCP tools, resources, prompt, OAuth wiring
-atlas_mcp/app.py         ASGI app: /mcp, /oauth/github/callback, /api, /openapi.json, /healthz
+atlas_mcp/app.py         ASGI app: /mcp, /oauth/github/callback, /invite, /api, /openapi.json, /healthz
 atlas_mcp/github_oauth.py  GitHub-backed OAuth authorization server provider
+atlas_mcp/tenants.py     tenant registry, invite links, per-tenant store resolution
+atlas_mcp/invite.py      CLI: mint a single-use invite link
 atlas_mcp/seed.py        seed import + single-file render
 deploy/                  setup.sh, apache vhost template, systemd unit, ufw, fail2ban, backups
-docs/                    ADR-001-auth.md (OAuth design), REVIEW.md (security review)
-data/projects/*.md       your notes — the actual product (gitignored, never committed)
+deploy/migrate_to_tenants.py  one-off: move the pre-multi-tenant store under tenants/<slug>/
+docs/                    ADR-001-auth.md (OAuth), ADR-002-multi-tenant.md (tenancy), REVIEW.md
+data/tenants/<slug>/projects/*.md  your notes, per tenant — the actual product (gitignored)
 seed/                    bootstrap seed (one file, all projects)
-tests/                   store unit tests + protocol-level e2e
+tests/                   store + tenant unit tests, protocol-level e2e
 ```
 
 ---

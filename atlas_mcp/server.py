@@ -23,6 +23,7 @@ from mcp.server.transport_security import TransportSecuritySettings
 from pydantic import BaseModel, ConfigDict, Field
 
 from .github_oauth import GitHubOAuthProvider
+from .tenants import InviteRegistry, TenantRegistry, get_store_for
 from .store import (
     ENTRY_KINDS,
     PRIORITY,
@@ -58,12 +59,20 @@ GITHUB_ALLOWED_USER = os.environ.get("ATLAS_GITHUB_ALLOWED_USER", "")
 OAUTH_ENABLED = bool(ATLAS_PUBLIC_URL and GITHUB_CLIENT_ID and GITHUB_CLIENT_SECRET and GITHUB_ALLOWED_USER)
 
 oauth_provider: GitHubOAuthProvider | None = None
+tenant_registry: TenantRegistry | None = None
+invite_registry: InviteRegistry | None = None
 if OAUTH_ENABLED:
+    tenant_registry = TenantRegistry(Path(ATLAS_ROOT) / "tenants.json")
+    invite_registry = InviteRegistry(Path(ATLAS_ROOT) / "invites.json")
+    # Bootstrap: the var that already gated single-user access seeds tenant
+    # #1 on first boot, so an existing .env needs zero changes to keep working.
+    if not tenant_registry.list():
+        tenant_registry.add(GITHUB_ALLOWED_USER)
     oauth_provider = GitHubOAuthProvider(
         state_path=Path(ATLAS_ROOT) / "oauth_state.json",
         client_id=GITHUB_CLIENT_ID,
         client_secret=GITHUB_CLIENT_SECRET,
-        allowed_user=GITHUB_ALLOWED_USER,
+        registry=tenant_registry,
         callback_url=f"{ATLAS_PUBLIC_URL}/oauth/github/callback",
     )
 
@@ -76,12 +85,20 @@ def audit(tool: str, target: str = "", outcome: str = "ok") -> None:
         return
     from datetime import datetime, timezone
 
+    tenant = ""
+    if OAUTH_ENABLED:
+        from mcp.server.auth.middleware.auth_context import get_access_token
+
+        token = get_access_token()
+        tenant = token.subject if token else ""
+
     line = json.dumps(
         {
             "ts": datetime.now(timezone.utc).isoformat(timespec="seconds"),
             "tool": tool,
             "target": target,
             "outcome": outcome,
+            "tenant": tenant,
         }
     )
     try:
@@ -89,6 +106,23 @@ def audit(tool: str, target: str = "", outcome: str = "ok") -> None:
             f.write(line + "\n")
     except OSError:
         pass
+
+
+def get_current_store() -> AtlasStore:
+    """The store for the acting identity. OAuth mode: resolves per GitHub
+    username via the auth context set by AuthContextMiddleware (see
+    tenants.get_store_for). Path-secret fallback mode: the single global
+    store — that mode is single-tenant by design, nothing to resolve."""
+    if not OAUTH_ENABLED:
+        return store
+    from mcp.server.auth.middleware.auth_context import get_access_token
+
+    token = get_access_token()
+    assert token is not None  # every tool call here is already auth-gated
+    return get_store_for(
+        token.subject, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY
+    )
+
 
 INSTRUCTIONS = f"""
 Project Atlas is Lukas' single source of truth for projects, research and ideas,
@@ -201,7 +235,7 @@ def atlas_list_projects(params: ListInput) -> str:
     Returns a compact markdown list (id, name, status, priority, completion).
     Call atlas_get_project for the full record of any id.
     """
-    hits = store.filter(params.status, params.priority, params.category, params.tag)
+    hits = get_current_store().filter(params.status, params.priority, params.category, params.tag)
     page = hits[params.offset : params.offset + params.limit]
     if not page:
         return "No projects match. Try atlas_list_projects with no filters."
@@ -225,7 +259,7 @@ class GetInput(BaseModel):
 )
 def atlas_get_project(params: GetInput) -> str:
     """Read one project: metadata, requested sections and the most recent log entries."""
-    p = store.load(params.id)
+    p = get_current_store().load(params.id)
     audit("atlas_get_project", p.id)
     out = [f"# {p.name} (`{p.id}`)", "```yaml\n" + _yaml(p.meta) + "\n```"]
     wanted = params.sections or SECTIONS
@@ -253,7 +287,7 @@ class SearchInput(BaseModel):
 def atlas_search(params: SearchInput) -> str:
     """Full-text search across all projects. Use this first when the user
     references a project by an informal name."""
-    hits = store.search(params.query, params.limit)
+    hits = get_current_store().search(params.query, params.limit)
     if not hits:
         return f"Nothing found for '{params.query}'. Try atlas_list_projects to see what exists."
     return "\n\n".join(
@@ -298,8 +332,9 @@ def atlas_upsert_project(params: UpsertInput) -> str:
     Rewriting a section replaces it. For incremental facts, decisions or
     progress use atlas_append_entry instead — it never destroys history.
     """
+    cur_store = get_current_store()
     pid = slugify(params.id)
-    created = not store.exists(pid)
+    created = not cur_store.exists(pid)
     if created:
         p = Project(
             id=pid,
@@ -317,7 +352,7 @@ def atlas_upsert_project(params: UpsertInput) -> str:
             body=new_project_body(),
         )
     else:
-        p = store.load(pid)
+        p = cur_store.load(pid)
         for key in ("name", "status", "priority", "category", "completion", "tags",
                     "links", "sensitivity"):
             val = getattr(params, key)
@@ -331,7 +366,7 @@ def atlas_upsert_project(params: UpsertInput) -> str:
             raise AtlasError("Pass 'content' together with 'section'.")
         p.set_section(params.section, params.content)
 
-    store.save(p, f"atlas: {'create' if created else 'update'} {pid}")
+    cur_store.save(p, f"atlas: {'create' if created else 'update'} {pid}")
     audit("atlas_upsert_project", pid, "created" if created else "updated")
     return f"{'Created' if created else 'Updated'} `{pid}`.\n" + p.summary_line()
 
@@ -361,12 +396,13 @@ def atlas_append_entry(params: AppendInput) -> str:
     This is the safe default write: it can never lose existing content and is
     how continuity between different assistants is maintained.
     """
-    p = store.load(params.id)
+    cur_store = get_current_store()
+    p = cur_store.load(params.id)
     entry = make_entry(params.kind, params.text, params.author)
     if "## Log" not in p.body:
         p.body = p.body.rstrip() + "\n\n## Log\n"
     p.body = p.body.rstrip() + "\n" + entry
-    store.save(p, f"atlas: {params.kind} on {p.id}")
+    cur_store.save(p, f"atlas: {params.kind} on {p.id}")
     audit("atlas_append_entry", p.id, params.kind)
     return f"Appended {params.kind} to `{p.id}`."
 
@@ -378,7 +414,7 @@ def atlas_append_entry(params: AppendInput) -> str:
 def atlas_overview() -> str:
     """Portfolio-level snapshot: counts per status/priority and the projects
     that have gone longest without an update. Good opening move for a review."""
-    ps = store.all()
+    ps = get_current_store().all()
     if not ps:
         return "Atlas is empty. Create the first project with atlas_upsert_project."
     by_status: dict[str, int] = {}
@@ -409,13 +445,13 @@ def res_instructions() -> str:
 @mcp.resource("atlas://index", mime_type="text/markdown")
 def res_index() -> str:
     """Index of all projects."""
-    return "\n".join(p.summary_line() for p in store.filter())
+    return "\n".join(p.summary_line() for p in get_current_store().filter())
 
 
 @mcp.resource("atlas://project/{project_id}", mime_type="text/markdown")
 def res_project(project_id: str) -> str:
     """Raw markdown of a single project file."""
-    return store.load(project_id).to_markdown()
+    return get_current_store().load(project_id).to_markdown()
 
 
 @mcp.prompt(name="atlas_review")

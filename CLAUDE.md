@@ -12,6 +12,8 @@ python -m atlas_mcp.app                       # dev server on :8787
 ATLAS_BASE=http://127.0.0.1:8787 python tests/test_e2e.py   # protocol round trip
 python -m atlas_mcp.seed import seed/PROJECT_ATLAS.seed.md  # bootstrap (idempotent)
 python -m atlas_mcp.seed render PROJECT_ATLAS.md            # derived view
+python tests/test_tenants.py                  # multi-tenant registry/isolation tests
+python -m atlas_mcp.invite                    # mint a single-use invite link (OAuth mode)
 ```
 
 Environment: `ATLAS_ROOT` (store dir), `ATLAS_TOKEN`, `ATLAS_GIT=1`,

@@ -6,6 +6,8 @@ Routes
   /mcp/{ATLAS_TOKEN}/        streamable HTTP MCP endpoint, path-secret scheme
                               (fallback when OAuth env vars are unset)
   /oauth/github/callback     GitHub login redirect target, only when OAuth is on
+  /invite/{token}            Redeem a single-use invite link, only when OAuth is on
+  /invite/callback           GitHub login redirect target for invite redemption
   /api/...                   REST facade                   -> ChatGPT Actions, curl, RAG
   /openapi.json              schema for the REST facade
   /healthz                   liveness
@@ -24,6 +26,7 @@ import os
 import secrets
 import time
 from collections import defaultdict, deque
+from urllib.parse import urlencode
 
 from starlette.applications import Starlette
 from starlette.middleware import Middleware
@@ -38,8 +41,23 @@ from mcp.server.auth.middleware.auth_context import AuthContextMiddleware
 from mcp.server.auth.middleware.bearer_auth import BearerAuthBackend
 from mcp.server.auth.provider import AuthorizeError, ProviderTokenVerifier
 
-from .server import ATLAS_PUBLIC_URL, OAUTH_ENABLED, mcp, oauth_provider, store
+from .github_oauth import GITHUB_AUTHORIZE_URL, verify_github_code
+from .server import (
+    ATLAS_GIT,
+    ATLAS_MAX_SENSITIVITY,
+    ATLAS_PUBLIC_URL,
+    ATLAS_ROOT,
+    GITHUB_CLIENT_ID,
+    GITHUB_CLIENT_SECRET,
+    OAUTH_ENABLED,
+    invite_registry,
+    mcp,
+    oauth_provider,
+    store,
+    tenant_registry,
+)
 from .store import AtlasError, Project, make_entry, new_project_body, slugify, utcnow
+from .tenants import get_store_for
 
 TOKEN = os.environ.get("ATLAS_TOKEN") or secrets.token_urlsafe(24)
 
@@ -261,6 +279,52 @@ async def on_error(request: Request, exc: Exception) -> JSONResponse:
     return JSONResponse({"error": str(exc) or type(exc).__name__}, status_code=status)
 
 
+INVITE_CALLBACK_URL = f"{ATLAS_PUBLIC_URL}/invite/callback"
+
+
+async def invite_start(request: Request):
+    """Entry point for a shared invite link: validate (without consuming)
+    then hand off to GitHub login, carrying the invite token as state."""
+    assert invite_registry is not None  # route only mounted when OAUTH_ENABLED
+    token = request.path_params["token"]
+    if not invite_registry.is_valid(token):
+        return PlainTextResponse("This invite link is no longer valid.", status_code=404)
+    query = urlencode(
+        {
+            "client_id": GITHUB_CLIENT_ID,
+            "redirect_uri": INVITE_CALLBACK_URL,
+            "scope": "read:user",
+            "state": token,
+            "allow_signup": "false",
+        }
+    )
+    return RedirectResponse(f"{GITHUB_AUTHORIZE_URL}?{query}", status_code=302)
+
+
+async def invite_callback(request: Request):
+    """GitHub redirects here after the invited user approves login. Redeems
+    the invite (single-use) and registers them as a new tenant."""
+    assert invite_registry is not None and tenant_registry is not None
+    code = request.query_params.get("code")
+    token = request.query_params.get("state")
+    if not code or not token:
+        return PlainTextResponse("Missing code or state.", status_code=400)
+    try:
+        username = await verify_github_code(code, GITHUB_CLIENT_ID, GITHUB_CLIENT_SECRET, INVITE_CALLBACK_URL)
+    except AuthorizeError as e:
+        return PlainTextResponse(f"Login failed: {e.error_description or e.error}", status_code=403)
+    if not invite_registry.redeem(token):
+        return PlainTextResponse("This invite link is no longer valid.", status_code=404)
+    tenant_registry.add(username)
+    get_store_for(username, ATLAS_ROOT, git=ATLAS_GIT, max_sensitivity=ATLAS_MAX_SENSITIVITY)
+    mcp_url = f"{ATLAS_PUBLIC_URL}/mcp"
+    return PlainTextResponse(
+        f"Welcome, {username}. Your Atlas is ready.\n\n"
+        f"Add this as a custom connector in Claude or ChatGPT:\n{mcp_url}\n\n"
+        "It will ask you to log in with GitHub again — that's expected."
+    )
+
+
 async def github_oauth_callback(request: Request):
     """GitHub redirects here after the user approves/denies login. Exchanges
     the GitHub code, checks identity against the allow-listed user, and
@@ -304,6 +368,10 @@ if OAUTH_ENABLED:
     # advertised URLs actually agree with each other.
     routes.extend(mcp.streamable_http_app().routes)
     routes.append(Route("/oauth/github/callback", github_oauth_callback))
+    # /invite/callback must be registered before the /invite/{token} catch-all
+    # or Starlette would match "callback" itself as a token.
+    routes.append(Route("/invite/callback", invite_callback))
+    routes.append(Route("/invite/{token}", invite_start))
 else:
     routes.append(Mount(f"/mcp/{TOKEN}", app=mcp.streamable_http_app()))
 

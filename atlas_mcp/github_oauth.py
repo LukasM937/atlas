@@ -5,9 +5,11 @@ client registration flow against us — we are the authorization server from
 their point of view (mcp.server.auth builds the actual HTTP endpoints and
 verifies PKCE; this module is only the storage/business-logic layer it
 calls into). Internally, our /authorize step redirects to GitHub's real
-login, and only a single allow-listed GitHub username is accepted — GitHub
-proves identity here, not authorization scope; there is exactly one
-authorized user for this personal server.
+login, and only usernames present in the TenantRegistry are accepted —
+GitHub proves identity here, not authorization scope. Membership is
+managed via the registry (bootstrapped from ATLAS_GITHUB_ALLOWED_USER,
+extended by invite-link redemption); each accepted username gets its own
+isolated AtlasStore (see tenants.py).
 
 State (registered clients, issued codes/tokens) persists to a JSON file next
 to the note store, so a container restart doesn't force every client to
@@ -38,6 +40,8 @@ from mcp.server.auth.provider import (
 )
 from mcp.shared.auth import OAuthClientInformationFull, OAuthToken
 
+from .tenants import TenantRegistry
+
 GITHUB_AUTHORIZE_URL = "https://github.com/login/oauth/authorize"
 GITHUB_TOKEN_URL = "https://github.com/login/oauth/access_token"
 GITHUB_USER_URL = "https://api.github.com/user"
@@ -47,19 +51,45 @@ AUTH_CODE_TTL = 300  # 5 minutes, single-use
 PENDING_TTL = 600  # 10 minutes to complete the GitHub redirect
 
 
+async def verify_github_code(code: str, client_id: str, client_secret: str, callback_url: str) -> str:
+    """Exchange a GitHub OAuth code for the logged-in user's username."""
+    async with httpx.AsyncClient() as http:
+        token_resp = await http.post(
+            GITHUB_TOKEN_URL,
+            headers={"Accept": "application/json"},
+            data={
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "code": code,
+                "redirect_uri": callback_url,
+            },
+        )
+        token_resp.raise_for_status()
+        gh_token = token_resp.json().get("access_token")
+        if not gh_token:
+            raise AuthorizeError(error="access_denied", error_description="GitHub login failed.")
+
+        user_resp = await http.get(GITHUB_USER_URL, headers={"Authorization": f"Bearer {gh_token}"})
+        user_resp.raise_for_status()
+        username = user_resp.json().get("login")
+    if not username:
+        raise AuthorizeError(error="access_denied", error_description="GitHub login failed.")
+    return username
+
+
 class GitHubOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, RefreshToken, AccessToken]):
     def __init__(
         self,
         state_path: str | Path,
         client_id: str,
         client_secret: str,
-        allowed_user: str,
+        registry: TenantRegistry,
         callback_url: str,
     ) -> None:
         self.state_path = Path(state_path)
         self.client_id = client_id
         self.client_secret = client_secret
-        self.allowed_user = allowed_user
+        self.registry = registry
         self.callback_url = callback_url
         self._clients: dict[str, OAuthClientInformationFull] = {}
         self._auth_codes: dict[str, AuthorizationCode] = {}
@@ -239,27 +269,9 @@ class GitHubOAuthProvider(OAuthAuthorizationServerProvider[AuthorizationCode, Re
         if pending is None or pending["expires_at"] < time.time():
             raise AuthorizeError(error="access_denied", error_description="Login expired or invalid, try again.")
 
-        async with httpx.AsyncClient() as http:
-            token_resp = await http.post(
-                GITHUB_TOKEN_URL,
-                headers={"Accept": "application/json"},
-                data={
-                    "client_id": self.client_id,
-                    "client_secret": self.client_secret,
-                    "code": code,
-                    "redirect_uri": self.callback_url,
-                },
-            )
-            token_resp.raise_for_status()
-            gh_token = token_resp.json().get("access_token")
-            if not gh_token:
-                raise AuthorizeError(error="access_denied", error_description="GitHub login failed.")
+        username = await verify_github_code(code, self.client_id, self.client_secret, self.callback_url)
 
-            user_resp = await http.get(GITHUB_USER_URL, headers={"Authorization": f"Bearer {gh_token}"})
-            user_resp.raise_for_status()
-            username = user_resp.json().get("login")
-
-        if username != self.allowed_user:
+        if not self.registry.is_allowed(username):
             raise AuthorizeError(
                 error="access_denied",
                 error_description=f"GitHub user '{username}' is not authorized for this Atlas.",
