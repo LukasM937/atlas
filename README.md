@@ -19,7 +19,9 @@ Claude and ChatGPT connect to your MCP/REST endpoint from *their own cloud
 infrastructure*, not from your phone or laptop. A server on your LAN, behind
 Tailscale, or behind a VPN-only connection will not work, full stop —
 there's no way around this, it's how the connector model works on both
-platforms.
+platforms and also on mobile devices.
+(Yes I know that there exists a 'Tunnel' option for ChatGPT but since this 
+has to work on both HTTPS is the simplest option.)
 
 If you don't already have a public server, the cheapest path is:
 
@@ -50,8 +52,7 @@ one TLS-terminating reverse proxy in front of one backend, with a couple of
 path-based access rules — Apache2 and nginx are functionally equivalent.
 If you already run nginx and would rather not add Apache, porting
 `deploy/apache/atlas.conf.template` (`ProxyPass`/`<Location>` → `proxy_pass`/
-`location`) is straightforward; nobody's written that config yet, so budget
-some time if you go that route.
+`location`) is straightforward;
 
 ---
 
