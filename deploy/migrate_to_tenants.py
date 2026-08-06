@@ -40,7 +40,24 @@ def main() -> None:
     dest = root / "tenants" / slug
 
     if not src_projects.is_dir():
-        raise SystemExit(f"No {src_projects} — nothing to migrate (already migrated?).")
+        # Two possibilities: fully done already, or projects/ moved but the
+        # .git rename after it failed partway (seen in practice: the
+        # container runs ATLAS_GIT commits as root with no USER directive,
+        # so .git ends up root-owned on the host and a non-root os.rename
+        # of it can fail with EACCES even though projects/ — owned the same
+        # way — moved fine moments earlier; parent-dir permissions can
+        # differ in effect from object ownership depending on the
+        # filesystem). Tell them which case this is instead of a blanket
+        # "already migrated?" that's actively misleading in the second case.
+        if dest.is_dir() and src_git.is_dir() and not (dest / ".git").exists():
+            raise SystemExit(
+                f"Partial migration detected: {dest / 'projects'} exists but "
+                f"{src_git} was never moved (likely a permissions error on "
+                f"the first attempt). Finish it by hand, then rerun to verify:\n"
+                f"    sudo mv {src_git} {dest / '.git'}\n"
+                f"    sudo chown -R $(id -un):$(id -gn) {dest}"
+            )
+        raise SystemExit(f"No {src_projects} — nothing to migrate (already fully migrated?).")
     if dest.exists():
         raise SystemExit(f"{dest} already exists — refusing to overwrite.")
 
