@@ -27,6 +27,22 @@ def test_invite_registry():
     print("invite registry: OK")
 
 
+def test_invite_registry_cross_process():
+    # Simulates the real deployment shape: `python -m atlas_mcp.invite` mints
+    # in one process, the running server redeems in another. Two separate
+    # InviteRegistry objects pointed at the same file, standing in for that.
+    d = tempfile.mkdtemp()
+    path = os.path.join(d, "invites.json")
+    minter = InviteRegistry(path)
+    server = InviteRegistry(path)
+
+    token = minter.create()
+    assert server.is_valid(token), "the 'server' instance must see an invite minted by another instance"
+    assert server.redeem(token) is True
+    assert minter.is_valid(token) is False, "redeeming via one instance must be visible to the other"
+    print("invite registry cross-process: OK")
+
+
 def test_isolation():
     d = tempfile.mkdtemp()
     alice = get_store_for("alice", d)
@@ -48,4 +64,5 @@ def test_isolation():
 
 test_tenant_registry()
 test_invite_registry()
+test_invite_registry_cross_process()
 test_isolation()

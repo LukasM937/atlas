@@ -1,9 +1,23 @@
 """Generate a single-use invite link for onboarding a new tenant.
 
-    python -m atlas_mcp.invite
+Docker Compose deployment (this project's default) — run it INSIDE the
+already-running container, so it sees the exact same ATLAS_ROOT/
+ATLAS_PUBLIC_URL the live server does:
 
-Prints the link once (not stored anywhere in plaintext) and exits. Requires
-ATLAS_ROOT and ATLAS_PUBLIC_URL to be set the same as the running server.
+    docker compose exec atlas python -m atlas_mcp.invite
+
+Running it bare on the host instead only works if you export
+ATLAS_ROOT/ATLAS_PUBLIC_URL yourself first — .env is read by `docker
+compose` to interpolate docker-compose.yml, it is never auto-sourced into
+any shell (container or host), regardless of the file's permissions.
+
+Safe to run repeatedly and from a different process than the server:
+InviteRegistry always reads/writes straight from $ATLAS_ROOT/invites.json
+under a lock (no in-memory cache), so the running server picks up an
+invite minted this way immediately, and redemption is still single-use
+even though minting and redeeming happen in different processes.
+
+Prints the link once (not stored anywhere in plaintext) and exits.
 """
 
 from __future__ import annotations
