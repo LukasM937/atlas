@@ -38,7 +38,10 @@
     ServerSignature Off
     TraceEnable Off
 
-    # 1 MB is far more than any note write needs.
+    # 1 MB is far more than any note write needs. NOTE: httpd exempts
+    # reverse-proxied request bodies from this directive, so it is NOT the
+    # effective cap here; atlas_mcp.app BodySizeLimitMiddleware meters the
+    # real stream (ATLAS_MAX_BODY_BYTES) and is the control that holds.
     LimitRequestBody 1048576
     <IfModule mod_reqtimeout.c>
         RequestReadTimeout header=10-20,MinRate=500 body=20,MinRate=500

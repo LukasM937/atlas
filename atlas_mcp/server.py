@@ -9,9 +9,11 @@ Nothing here is Claude-specific: the store is plain markdown on your disk.
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import json
 import os
-from typing import Annotated, Any, Literal, Optional
+from typing import Annotated, Any, Callable, Literal, Optional
 
 from pathlib import Path
 
@@ -106,6 +108,23 @@ def audit(tool: str, target: str = "", outcome: str = "ok") -> None:
             f.write(line + "\n")
     except OSError:
         pass
+
+
+def offload(fn: Callable[..., Any]) -> Callable[..., Any]:
+    """Run a blocking tool body in a worker thread.
+
+    FastMCP calls sync tools directly on the event loop, and the store does
+    blocking file I/O, YAML parsing, regex scans and git subprocesses -- one
+    slow call would freeze every tenant, the OAuth endpoints and /healthz.
+    functools.wraps keeps the signature FastMCP builds the input schema from;
+    asyncio.to_thread copies contextvars, so get_access_token() still works.
+    """
+
+    @functools.wraps(fn)
+    async def wrapper(*args: Any, **kwargs: Any) -> Any:
+        return await asyncio.to_thread(fn, *args, **kwargs)
+
+    return wrapper
 
 
 def get_current_store() -> AtlasStore:
@@ -211,6 +230,12 @@ mcp = FastMCP(
 # --------------------------------------------------------------------------
 
 
+# Per-field cap on free text accepted from a caller; the store separately caps
+# the accumulated size of a whole project (store.MAX_BODY_CHARS).
+MAX_FIELD_CHARS = 100_000
+MAX_ENTRY_CHARS = 20_000
+
+
 class ListInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
     status: Optional[Literal[tuple(STATUS)]] = Field(  # type: ignore[valid-type]
@@ -219,8 +244,10 @@ class ListInput(BaseModel):
     priority: Optional[Literal["S", "A", "B", "C", "D"]] = Field(
         default=None, description="Filter by strategic priority. S is critical."
     )
-    category: Optional[str] = Field(default=None, description="e.g. 'ml', 'hardware', 'writing'.")
-    tag: Optional[str] = Field(default=None, description="Single tag that must be present.")
+    category: Optional[str] = Field(
+        default=None, max_length=100, description="e.g. 'ml', 'hardware', 'writing'.")
+    tag: Optional[str] = Field(
+        default=None, max_length=100, description="Single tag that must be present.")
     limit: int = Field(default=30, ge=1, le=200)
     offset: int = Field(default=0, ge=0)
 
@@ -229,6 +256,7 @@ class ListInput(BaseModel):
     name="atlas_list_projects",
     annotations={"title": "List Atlas projects", "readOnlyHint": True, "openWorldHint": False},
 )
+@offload
 def atlas_list_projects(params: ListInput) -> str:
     """List projects in the Atlas, newest-relevant first, with optional filters.
 
@@ -245,10 +273,11 @@ def atlas_list_projects(params: ListInput) -> str:
 
 class GetInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    id: str = Field(..., description="Project id/slug, e.g. 'my-project'.", min_length=1)
-    sections: Optional[list[str]] = Field(
+    id: str = Field(..., description="Project id/slug, e.g. 'my-project'.", min_length=1, max_length=128)
+    sections: Optional[list[Literal[tuple(SECTIONS + ["Log"])]]] = Field(  # type: ignore[valid-type]
         default=None,
-        description=f"Only return these sections. One of: {SECTIONS + ['Log']}. Omit for all.",
+        max_length=len(SECTIONS) + 1,
+        description=f"Only return these sections. Each one of: {SECTIONS + ['Log']}. Omit for all.",
     )
     log_limit: int = Field(default=15, ge=0, le=200, description="Most recent log entries to include.")
 
@@ -257,6 +286,7 @@ class GetInput(BaseModel):
     name="atlas_get_project",
     annotations={"title": "Read a project", "readOnlyHint": True, "openWorldHint": False},
 )
+@offload
 def atlas_get_project(params: GetInput) -> str:
     """Read one project: metadata, requested sections and the most recent log entries."""
     p = get_current_store().load(params.id)
@@ -276,7 +306,9 @@ def atlas_get_project(params: GetInput) -> str:
 
 class SearchInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    query: str = Field(..., description="Free-text terms, e.g. 'mamba encoder walk-forward'.", min_length=1)
+    query: str = Field(
+        ..., description="Free-text terms (at most 16), e.g. 'mamba encoder walk-forward'.",
+        min_length=1, max_length=512)
     limit: int = Field(default=8, ge=1, le=50)
 
 
@@ -284,6 +316,7 @@ class SearchInput(BaseModel):
     name="atlas_search",
     annotations={"title": "Search the Atlas", "readOnlyHint": True, "openWorldHint": False},
 )
+@offload
 def atlas_search(params: SearchInput) -> str:
     """Full-text search across all projects. Use this first when the user
     references a project by an informal name."""
@@ -298,23 +331,66 @@ def atlas_search(params: SearchInput) -> str:
 
 class UpsertInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    id: str = Field(..., description="Slug id. Created if it does not exist.", min_length=1)
-    name: Optional[str] = Field(default=None, description="Human-readable project name.")
+    id: str = Field(..., description="Slug id. Created if it does not exist.", min_length=1, max_length=128)
+    name: Optional[str] = Field(default=None, max_length=200, description="Human-readable project name.")
     status: Optional[Literal[tuple(STATUS)]] = None  # type: ignore[valid-type]
     priority: Optional[Literal["S", "A", "B", "C", "D"]] = None
-    category: Optional[str] = None
+    category: Optional[str] = Field(default=None, max_length=100)
     completion: Optional[int] = Field(default=None, ge=0, le=100, description="Percent done.")
-    tags: Optional[list[str]] = Field(default=None, max_length=20)
-    links: Optional[list[str]] = Field(default=None, max_length=20, description="URLs or repo paths.")
+    tags: Optional[list[Annotated[str, Field(max_length=64)]]] = Field(default=None, max_length=20)
+    links: Optional[list[Annotated[str, Field(max_length=500)]]] = Field(
+        default=None, max_length=20, description="URLs or repo paths.")
     sensitivity: Optional[Literal["public", "internal", "confidential", "secret"]] = Field(
         default=None,
         description="Classification. Default 'internal'. Records above this "
         "instance's clearance cannot be written or read here.",
     )
     section: Optional[str] = Field(
-        default=None, description=f"Section to rewrite. One of: {SECTIONS}."
+        default=None, max_length=64, description=f"Section to rewrite. One of: {SECTIONS}."
     )
-    content: Optional[str] = Field(default=None, description="New markdown for that section.")
+    content: Optional[str] = Field(
+        default=None, max_length=MAX_FIELD_CHARS, description="New markdown for that section.")
+
+
+def apply_upsert(cur_store: AtlasStore, params: UpsertInput, summary: str = "") -> tuple[Project, bool]:
+    """Create or update one project. Shared by the MCP tool and the REST facade
+    so both enforce the same validation and caps. Returns (project, created)."""
+    pid = slugify(params.id)
+    with cur_store.write_lock:
+        created = not cur_store.exists(pid)
+        if created:
+            p = Project(
+                id=pid,
+                meta={
+                    "name": params.name or params.id,
+                    "category": params.category or "unsorted",
+                    "status": params.status or "concept",
+                    "priority": params.priority or "C",
+                    "completion": params.completion or 0,
+                    "created": utcnow(),
+                    "tags": params.tags or [],
+                    "links": params.links or [],
+                    "sensitivity": params.sensitivity or "internal",
+                },
+                body=new_project_body(summary),
+            )
+        else:
+            p = cur_store.load(pid)
+            for key in ("name", "status", "priority", "category", "completion", "tags",
+                        "links", "sensitivity"):
+                val = getattr(params, key)
+                if val is not None:
+                    p.meta[key] = val
+
+        if params.section:
+            if params.section not in SECTIONS:
+                raise AtlasError(f"Unknown section '{params.section}'. Allowed: {SECTIONS}.")
+            if not params.content:
+                raise AtlasError("Pass 'content' together with 'section'.")
+            p.set_section(params.section, params.content)
+
+        cur_store.save(p, f"atlas: {'create' if created else 'update'} {pid}")
+    return p, created
 
 
 @mcp.tool(
@@ -326,59 +402,41 @@ class UpsertInput(BaseModel):
         "idempotentHint": True,
     },
 )
+@offload
 def atlas_upsert_project(params: UpsertInput) -> str:
     """Create a project or update its metadata and at most one section.
 
     Rewriting a section replaces it. For incremental facts, decisions or
     progress use atlas_append_entry instead — it never destroys history.
     """
-    cur_store = get_current_store()
-    pid = slugify(params.id)
-    created = not cur_store.exists(pid)
-    if created:
-        p = Project(
-            id=pid,
-            meta={
-                "name": params.name or params.id,
-                "category": params.category or "unsorted",
-                "status": params.status or "concept",
-                "priority": params.priority or "C",
-                "completion": params.completion or 0,
-                "created": utcnow(),
-                "tags": params.tags or [],
-                "links": params.links or [],
-                "sensitivity": params.sensitivity or "internal",
-            },
-            body=new_project_body(),
-        )
-    else:
-        p = cur_store.load(pid)
-        for key in ("name", "status", "priority", "category", "completion", "tags",
-                    "links", "sensitivity"):
-            val = getattr(params, key)
-            if val is not None:
-                p.meta[key] = val
-
-    if params.section:
-        if params.section not in SECTIONS:
-            raise AtlasError(f"Unknown section '{params.section}'. Allowed: {SECTIONS}.")
-        if not params.content:
-            raise AtlasError("Pass 'content' together with 'section'.")
-        p.set_section(params.section, params.content)
-
-    cur_store.save(p, f"atlas: {'create' if created else 'update'} {pid}")
-    audit("atlas_upsert_project", pid, "created" if created else "updated")
-    return f"{'Created' if created else 'Updated'} `{pid}`.\n" + p.summary_line()
+    p, created = apply_upsert(get_current_store(), params)
+    audit("atlas_upsert_project", p.id, "created" if created else "updated")
+    return f"{'Created' if created else 'Updated'} `{p.id}`.\n" + p.summary_line()
 
 
 class AppendInput(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
-    id: str = Field(..., description="Project id/slug.", min_length=1)
+    id: str = Field(..., description="Project id/slug.", min_length=1, max_length=128)
     kind: Literal["decision", "note", "log", "question", "result", "idea"] = Field(
         ..., description="decision = a choice + its reason; result = measured outcome."
     )
-    text: str = Field(..., description="One or two sentences. Include the 'why' for decisions.", min_length=1)
-    author: str = Field(default="claude", description="Which assistant or person is writing.")
+    text: str = Field(
+        ..., description="One or two sentences. Include the 'why' for decisions.",
+        min_length=1, max_length=MAX_ENTRY_CHARS)
+    author: str = Field(
+        default="claude", max_length=64, description="Which assistant or person is writing.")
+
+
+def apply_append(cur_store: AtlasStore, params: AppendInput) -> Project:
+    """Append one log entry (shared by the MCP tool and the REST facade)."""
+    with cur_store.write_lock:
+        p = cur_store.load(params.id)
+        entry = make_entry(params.kind, params.text, params.author)
+        if "## Log" not in p.body:
+            p.body = p.body.rstrip() + "\n\n## Log\n"
+        p.body = p.body.rstrip() + "\n" + entry
+        cur_store.save(p, f"atlas: {params.kind} on {p.id}")
+    return p
 
 
 @mcp.tool(
@@ -390,19 +448,14 @@ class AppendInput(BaseModel):
         "idempotentHint": False,
     },
 )
+@offload
 def atlas_append_entry(params: AppendInput) -> str:
     """Append a dated, attributed entry to a project's append-only log.
 
     This is the safe default write: it can never lose existing content and is
     how continuity between different assistants is maintained.
     """
-    cur_store = get_current_store()
-    p = cur_store.load(params.id)
-    entry = make_entry(params.kind, params.text, params.author)
-    if "## Log" not in p.body:
-        p.body = p.body.rstrip() + "\n\n## Log\n"
-    p.body = p.body.rstrip() + "\n" + entry
-    cur_store.save(p, f"atlas: {params.kind} on {p.id}")
+    p = apply_append(get_current_store(), params)
     audit("atlas_append_entry", p.id, params.kind)
     return f"Appended {params.kind} to `{p.id}`."
 
@@ -411,6 +464,7 @@ def atlas_append_entry(params: AppendInput) -> str:
     name="atlas_overview",
     annotations={"title": "Atlas overview", "readOnlyHint": True, "openWorldHint": False},
 )
+@offload
 def atlas_overview() -> str:
     """Portfolio-level snapshot: counts per status/priority and the projects
     that have gone longest without an update. Good opening move for a review."""
@@ -443,12 +497,14 @@ def res_instructions() -> str:
 
 
 @mcp.resource("atlas://index", mime_type="text/markdown")
+@offload
 def res_index() -> str:
     """Index of all projects."""
     return "\n".join(p.summary_line() for p in get_current_store().filter())
 
 
 @mcp.resource("atlas://project/{project_id}", mime_type="text/markdown")
+@offload
 def res_project(project_id: str) -> str:
     """Raw markdown of a single project file."""
     return get_current_store().load(project_id).to_markdown()

@@ -15,7 +15,25 @@ services:
       ATLAS_GITHUB_CLIENT_ID: ${ATLAS_GITHUB_CLIENT_ID:-}
       ATLAS_GITHUB_CLIENT_SECRET: ${ATLAS_GITHUB_CLIENT_SECRET:-}
       ATLAS_GITHUB_ALLOWED_USER: ${ATLAS_GITHUB_ALLOWED_USER:-}
+      # Every external request reaches the app through the published port, which
+      # Docker NAT rewrites to one constant source: this network's gateway.
+      # uvicorn only trusts Apache's sanitized X-Forwarded-For when the direct
+      # peer is listed here; without it every client shares ONE rate-limit
+      # bucket and a single anonymous client can 429 the whole service. Exact
+      # gateway address only (subnet pinned below), never a range, so sibling
+      # containers cannot forge client keys.
+      FORWARDED_ALLOW_IPS: "127.0.0.1,::1,172.28.0.1"
+      # compose does not auto-inject .env vars; list it or it is silently ignored.
+      ATLAS_RATE_LIMIT_PER_MIN: ${ATLAS_RATE_LIMIT_PER_MIN:-120}
     volumes:
       - ./data:/data
     ports:
       - "127.0.0.1:8787:8787"
+
+networks:
+  default:
+    ipam:
+      config:
+        # Pinned so FORWARDED_ALLOW_IPS above names the actual gateway.
+        # Change both together if this collides with an existing network.
+        - subnet: 172.28.0.0/24

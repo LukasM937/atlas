@@ -155,13 +155,38 @@ OAuth" section.
 - No per-record access control beyond the four sensitivity levels. Multi-
   tenant isolation is per-*tenant*, not per-record — see above.
 
+## Limits and operator duties (added after the OpenVuln review)
+
+- **Sizes are capped at the sink** (`store.py`): 256 KiB per project body,
+  500 projects per tenant, 16 search terms / 512 chars, 1 MiB per request
+  (metered on the stream, not just `Content-Length`). OAuth: 256 registered
+  clients (idle ones are evicted), 8 KiB per client, 1024 pending logins.
+- **Store work runs in worker threads**, not on the event loop, so one slow
+  request cannot freeze other tenants, `/healthz` or the OAuth endpoints.
+- **Client login requires explicit consent** on a page naming the requesting
+  client and the host that will receive the code. Dynamic client registration
+  stays open (Claude/ChatGPT need it); the consent page is the end-user gate.
+- **Tenancy is bound to the immutable GitHub id**, recorded on first login
+  (invite redemption, or first login of the bootstrap owner). A recycled
+  username does not inherit a tenant. Removing a tenant = delete its entry in
+  `tenants.json`: live access and refresh tokens stop on the next request, no
+  restart. Its `tenants/<slug>/` directory is *not* deleted; onboarding the
+  same username again is refused until you archive or remove it.
+- **Refresh tokens last 30 days**; revoking any token revokes its whole grant,
+  and replaying a rotated refresh token revokes the grant.
+- `oauth_state.json` is created `0600` but still holds client secrets and
+  tokens in cleartext — accepted risk; treat it like `.env`.
+- Behind Docker NAT, `FORWARDED_ALLOW_IPS` in `docker-compose.yml` must name
+  the bridge gateway, otherwise all clients share one rate-limit bucket.
+
 ## If you think the store leaked
 
 1. Disconnect the connector in Claude and revoke it at the provider.
 2. Rotate `ATLAS_TOKEN` (or the OAuth client), reload Apache, re-add.
 3. `git log` in the affected tenant's store repo (`tenants/<slug>/.git` in
-   multi-tenant mode, the store root itself otherwise) — every write is a
-   commit, so the diff is the exposure.
+   multi-tenant mode, the store root itself otherwise) — writes are committed
+   (at most one commit per project file per minute, so a burst of writes
+   shows as one diff), so the diff is the exposure.
 4. Read the audit log for the window.
 5. Decide, per record, whether the classification was wrong; fix the
    classification before restoring service.

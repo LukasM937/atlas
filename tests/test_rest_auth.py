@@ -42,6 +42,7 @@ def test_static_token_rejected_in_oauth_mode():
 
 
 def test_oauth_token_resolves_own_tenant_and_is_isolated():
+    appmod.tenant_registry.add("alice")
     _seed("alice", "alice-secret")
     fake_token = "fake-alice-access-token"
     appmod.oauth_provider._access_tokens[fake_token] = AccessToken(
@@ -59,6 +60,48 @@ def test_oauth_token_resolves_own_tenant_and_is_isolated():
     print("oauth token -> own tenant, isolated: OK")
 
 
+def test_removed_tenant_token_stops_working_immediately():
+    import json
+    appmod.tenant_registry.add("dave")
+    tok = "fake-dave-access-token"
+    appmod.oauth_provider._access_tokens[tok] = AccessToken(
+        token=tok, client_id="c", scopes=["mcp"], expires_at=int(time.time()) + 3600, subject="dave")
+    hdr = {"Authorization": f"Bearer {tok}"}
+    assert client.get("/api/projects", headers=hdr).status_code == 200
+    path = appmod.tenant_registry.state_path
+    data = json.loads(path.read_text()); del data["dave"]; path.write_text(json.dumps(data))
+    assert client.get("/api/projects", headers=hdr).status_code == 401, "deauthorized tenant kept access"
+    print("removed tenant loses access without restart: OK")
+
+
+def test_request_hardening():
+    appmod.tenant_registry.add("erin")
+    tok = "fake-erin-access-token"
+    appmod.oauth_provider._access_tokens[tok] = AccessToken(
+        token=tok, client_id="c", scopes=["mcp"], expires_at=int(time.time()) + 3600, subject="erin")
+    hdr = {"Authorization": f"Bearer {tok}"}
+    # chunked body (no Content-Length) is metered, not buffered without bound
+    def gen():
+        for _ in range(3):
+            yield b"x" * (appmod.MAX_BODY_BYTES // 2)
+    r = client.post("/api/projects", headers=hdr, content=gen())
+    assert r.status_code == 413, r.status_code
+    # REST validates like the MCP models: bad vocab / oversize / unknown keys rejected
+    for bad in ({"id": "p", "status": "bogus"}, {"id": "p", "name": "x" * 500},
+                {"id": "p", "mystery": 1}, {"id": "p", "tags": ["a"] * 50}):
+        r = client.post("/api/projects", headers=hdr, json=bad)
+        assert r.status_code == 400, (bad, r.status_code, r.text)
+    assert client.post("/api/projects", headers=hdr, content=b"not json").status_code == 400
+    # frontmatter metadata is PII-scanned too
+    r = client.post("/api/projects", headers=hdr, json={"id": "p", "name": "mail me at a@example.com"})
+    assert r.status_code == 400 and "email" in r.text, r.text
+    ok = client.post("/api/projects", headers=hdr, json={"id": "p", "name": "fine"})
+    assert ok.status_code == 200, ok.text
+    assert client.get("/api/search?q=" + "a+" * 40, headers=hdr).status_code == 400
+    assert client.get("/api/search?q=fine&limit=abc", headers=hdr).status_code == 400
+    print("request hardening (body cap, validation, meta scan, search cap): OK")
+
+
 def test_bad_token_rejected():
     resp = client.get("/api/projects", headers={"Authorization": "Bearer nonsense"})
     assert resp.status_code == 401, resp.status_code
@@ -70,4 +113,6 @@ def test_bad_token_rejected():
 with client:
     test_static_token_rejected_in_oauth_mode()
     test_oauth_token_resolves_own_tenant_and_is_isolated()
+    test_removed_tenant_token_stops_working_immediately()
+    test_request_hardening()
     test_bad_token_rejected()

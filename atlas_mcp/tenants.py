@@ -55,23 +55,53 @@ def _locked_json_update(path: Path, mutate: Callable[[dict], T]) -> T:
 
 
 class TenantRegistry:
+    """No in-memory cache, same reasoning as InviteRegistry below: this file
+    is also edited outside the process (the operator removes a tenant by
+    deleting its entry), so every call reads $state_path fresh and every
+    write is a locked read-modify-write that preserves such edits. A removal
+    takes effect on the next request and cannot be reverted by a later add().
+
+    Each entry is bound to the immutable numeric GitHub account id. GitHub
+    logins are mutable and recyclable; matching on the string alone would
+    hand a released username's tenant to whoever registers it next."""
+
     def __init__(self, state_path: str | Path) -> None:
         self.state_path = Path(state_path)
-        self._tenants: dict[str, dict] = {}
-        if self.state_path.exists():
-            self._tenants = json.loads(self.state_path.read_text(encoding="utf-8"))
 
-    def is_allowed(self, username: str) -> bool:
-        return username in self._tenants
+    def _read(self) -> dict[str, dict]:
+        return json.loads(self.state_path.read_text(encoding="utf-8")) if self.state_path.exists() else {}
 
-    def add(self, username: str) -> None:
-        if username in self._tenants:
-            return
-        self._tenants[username] = {"created": time.time()}
-        _atomic_write_json(self.state_path, self._tenants)
+    def has(self, username: str) -> bool:
+        """Membership only (used to re-check live tokens on every request)."""
+        return username in self._read()
+
+    def is_allowed(self, username: str, github_id: int | None = None) -> bool:
+        """Login check: the name must be registered AND the GitHub id must
+        match the one recorded for it. Legacy entries without a recorded id
+        (owner bootstrap from env) are claimed by the first matching login."""
+
+        def mutate(tenants: dict) -> bool:
+            entry = tenants.get(username)
+            if entry is None:
+                return False
+            bound = entry.get("github_id")
+            if bound is None:
+                if github_id is None:
+                    return False
+                entry["github_id"] = github_id
+                return True
+            return github_id is not None and bound == github_id
+
+        return _locked_json_update(self.state_path, mutate)
+
+    def add(self, username: str, github_id: int | None = None) -> None:
+        def mutate(tenants: dict) -> None:
+            tenants.setdefault(username, {"created": time.time(), "github_id": github_id})
+
+        _locked_json_update(self.state_path, mutate)
 
     def list(self) -> list[str]:
-        return list(self._tenants)
+        return list(self._read())
 
 
 class InviteRegistry:

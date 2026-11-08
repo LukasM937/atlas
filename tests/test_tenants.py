@@ -6,12 +6,27 @@ from atlas_mcp.store import Project, new_project_body
 
 def test_tenant_registry():
     d = tempfile.mkdtemp()
-    reg = TenantRegistry(os.path.join(d, "tenants.json"))
-    assert not reg.is_allowed("alice")
-    reg.add("alice")
-    assert reg.is_allowed("alice")
-    assert not reg.is_allowed("bob")
+    path = os.path.join(d, "tenants.json")
+    reg = TenantRegistry(path)
+    assert not reg.is_allowed("alice", 1)
+    reg.add("alice", 1)
+    assert reg.is_allowed("alice", 1)
+    assert not reg.is_allowed("bob", 2)
     assert reg.list() == ["alice"]
+    # a recycled username (same string, different immutable GitHub id) must fail
+    assert not reg.is_allowed("alice", 999), "recycled username must not inherit the tenant"
+    assert not reg.is_allowed("alice", None)
+    # legacy/bootstrap entry (no id yet) is claimed by the first login, then bound
+    reg.add("owner")
+    assert not reg.is_allowed("owner", None)
+    assert reg.is_allowed("owner", 7)
+    assert not reg.is_allowed("owner", 8), "first login binds the identity"
+    # removal by editing the file takes effect at once, and add() cannot undo it
+    import json
+    data = json.load(open(path)); del data["alice"]; json.dump(data, open(path, "w"))
+    assert not reg.has("alice") and not reg.is_allowed("alice", 1)
+    reg.add("carol", 3)
+    assert not reg.has("alice"), "add() must not write a stale snapshot back"
     print("tenant registry: OK")
 
 

@@ -15,7 +15,8 @@ python -m atlas_mcp.seed render PROJECT_ATLAS.md            # derived view
 python tests/test_tenants.py                  # multi-tenant registry/isolation tests
 python tests/test_rest_auth.py                # REST auth (OAuth mode): OAuth token resolves+isolates, static token rejected
 python tests/test_rest_auth_fallback.py       # REST auth (no OAuth): static token still the sole credential
-python tests/test_invite_route.py             # invite flow redirects through the one registered GitHub callback
+python tests/test_invite_route.py             # invite flow redirects through the one registered GitHub callback; consent page; leftover-tenant refusal
+python tests/test_oauth.py                    # OAuth provider: consent, GitHub-id-bound tenancy, token lifecycle/revocation, ingress caps
 python -m atlas_mcp.invite                    # mint a single-use invite link (OAuth mode)
 ```
 
